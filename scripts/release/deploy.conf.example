@@ -1,0 +1,14 @@
+# Non-secret server deployment settings.
+# Install as /etc/ai-lifeos/deploy.conf, owned by root:root, mode 0644.
+
+AIOS_ROOT=/srv/ai-lifeos
+AIOS_SERVICE_NAME=ai-lifeos.service
+AIOS_SERVICE_USER=aios
+AIOS_SERVICE_GROUP=aios
+AIOS_SERVICE_HOME=/var/lib/ai-lifeos
+AIOS_DEPLOY_USER=deploy
+AIOS_DEPLOY_GROUP=deploy
+AIOS_SHARED_ENV_FILE=/srv/ai-lifeos/shared/public-beta.env
+AIOS_PUBLIC_PORT=3000
+AIOS_CANDIDATE_PORT=3001
+AIOS_HEALTH_PATH=/

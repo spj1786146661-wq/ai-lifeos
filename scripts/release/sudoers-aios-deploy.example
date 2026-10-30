@@ -1,0 +1,4 @@
+# Install as /etc/sudoers.d/aios-deploy with mode 0440.
+# Replace "deploy" with the restricted SSH deployment account.
+
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/aios-deploy-release, /usr/local/sbin/aios-rollback-release

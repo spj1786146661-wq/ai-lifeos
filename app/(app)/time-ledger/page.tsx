@@ -1,0 +1,762 @@
+'use client'
+
+import { useState, useEffect, useCallback, useRef, memo } from 'react'
+import { useAuth } from '@/lib/hooks/useAuth'
+import { setDocument, queryDocuments, where } from '@/lib/firebase/db'
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+type Classification = 'high-yield' | 'maintenance' | 'mediocre' | null
+
+interface Block {
+  entry: string
+  classification: Classification
+  note?: string | null
+}
+
+interface DayData {
+  blocks: Record<string, Block>
+  mediocreScore: number | null
+  status: 'on-fire' | 'solid' | 'mediocre' | null
+  verdict?: string
+  analyzedAt?: string
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const SLOTS: string[] = []
+for (let h = 0; h < 24; h++) {
+  SLOTS.push(`${String(h).padStart(2, '0')}:00`)
+  SLOTS.push(`${String(h).padStart(2, '0')}:30`)
+}
+
+const CLASS_META = {
+  'high-yield':  { label: 'High Yield',  color: '#10b981', bg: 'rgba(16,185,129,0.12)', icon: '🔥' },
+  'maintenance': { label: 'Maintenance', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)', icon: '⚙️' },
+  'mediocre':    { label: 'Mediocre',    color: '#ef4444', bg: 'rgba(239,68,68,0.12)',  icon: '💀' },
+} as const
+
+const BULK_LABELS = ['Deep Work', 'Sleep', 'Break', 'Admin', 'Workout', 'Personal']
+
+function dateStr(d: Date) { return d.toISOString().split('T')[0] }
+function addDays(d: Date, n: number) { const r = new Date(d); r.setDate(r.getDate() + n); return r }
+function isCurrentSlot(slot: string) {
+  const now = new Date(), h = now.getHours(), m = now.getMinutes()
+  const [sh, sm] = slot.split(':').map(Number)
+  const slotMin = sh * 60 + sm, nowMin = h * 60 + m
+  return nowMin >= slotMin && nowMin < slotMin + 30
+}
+function isPastSlot(slot: string) {
+  const now = new Date()
+  const [sh, sm] = slot.split(':').map(Number)
+  return now.getHours() * 60 + now.getMinutes() > sh * 60 + sm
+}
+
+// ─── SlotRow — defined OUTSIDE parent so its identity is stable ───────────────
+interface SlotRowProps {
+  slot: string
+  block: Block | undefined
+  ghost: string | undefined
+  isActive: boolean
+  isToday: boolean
+  isPast: boolean
+  isSaving: boolean
+  bulkMode: boolean
+  isSelected: boolean
+  onActivate: (slot: string) => void
+  onDeactivate: () => void
+  onUpdate: (slot: string, entry: string) => void
+  onToggleSelect: (slot: string) => void
+}
+
+const SlotRow = memo(function SlotRow({
+  slot, block, ghost, isActive, isToday, isPast, isSaving,
+  bulkMode, isSelected,
+  onActivate, onDeactivate, onUpdate, onToggleSelect,
+}: SlotRowProps) {
+  const entry = block?.entry ?? ''
+  const cls   = block?.classification ?? null
+  const isCurrent = isToday && isCurrentSlot(slot)
+  const meta  = cls ? CLASS_META[cls] : null
+
+  // Local textarea state — prevents cursor-reset on parent re-renders
+  const [localValue, setLocalValue] = useState(entry)
+  const isActiveRef = useRef(isActive)
+  isActiveRef.current = isActive
+
+  // Sync external entry changes into local state (e.g. after AI analysis or bulk fill)
+  useEffect(() => {
+    if (!isActiveRef.current) setLocalValue(entry)
+  }, [entry])
+
+  function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const val = e.target.value
+    setLocalValue(val)
+    onUpdate(slot, val)
+  }
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
+      padding: '0.3rem 0.5rem', borderRadius: 8, transition: 'background 0.2s',
+      background: isSelected
+        ? 'rgba(99,102,241,0.12)'
+        : isCurrent ? 'rgba(20,184,166,0.08)' : cls ? meta!.bg : 'transparent',
+      border: isSelected
+        ? '1px solid rgba(99,102,241,0.4)'
+        : isCurrent ? '1px solid rgba(20,184,166,0.3)' : '1px solid transparent',
+    }}>
+      {/* Bulk checkbox OR time label */}
+      {bulkMode ? (
+        <div
+          onClick={() => onToggleSelect(slot)}
+          style={{
+            width: 40, flexShrink: 0, paddingTop: '0.4rem', display: 'flex',
+            alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+          }}
+        >
+          <div style={{
+            width: 16, height: 16, borderRadius: 4, border: '2px solid',
+            borderColor: isSelected ? '#6366f1' : 'var(--border)',
+            background: isSelected ? '#6366f1' : 'transparent',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            {isSelected && <span style={{ color: '#fff', fontSize: '0.6rem', fontWeight: 900 }}>✓</span>}
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          width: 40, flexShrink: 0, paddingTop: '0.4rem',
+          fontSize: '0.65rem', fontFamily: 'monospace',
+          color: isCurrent ? '#14b8a6' : 'var(--text-muted)',
+          fontWeight: isCurrent ? 800 : 500,
+        }}>
+          {slot}
+          {isCurrent && <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#14b8a6', marginTop: 2 }} />}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {isActive && !bulkMode ? (
+          <textarea
+            autoFocus
+            value={localValue}
+            onChange={handleChange}
+            onBlur={() => { onUpdate(slot, localValue); onDeactivate() }}
+            placeholder={ghost ? `Typically: ${ghost}` : 'What did you do here?'}
+            rows={2}
+            style={{
+              width: '100%', padding: '0.4rem 0.6rem', borderRadius: 8, fontSize: '0.78rem',
+              border: `1px solid ${meta?.color ?? '#14b8a6'}`,
+              background: 'var(--surface-2)', color: 'var(--text-primary)',
+              resize: 'none', outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit',
+            }}
+          />
+        ) : (
+          <div
+            onClick={() => bulkMode ? onToggleSelect(slot) : onActivate(slot)}
+            style={{
+              minHeight: 28, padding: '0.35rem 0.5rem', borderRadius: 8,
+              cursor: bulkMode ? 'pointer' : 'text',
+              fontSize: '0.78rem',
+              color: entry ? (meta?.color ?? 'var(--text-primary)') : 'var(--text-muted)',
+              fontStyle: entry ? 'normal' : 'italic',
+            }}
+          >
+            {entry || (ghost
+              ? <span style={{ opacity: 0.35 }}>Typically: {ghost}</span>
+              : isPast ? <span style={{ opacity: 0.25 }}>— backfill this block</span> : null
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Classification badge */}
+      {cls && !bulkMode && (
+        <div style={{ flexShrink: 0, paddingTop: '0.35rem', fontSize: '0.65rem', fontWeight: 700, color: meta!.color }}>
+          {meta!.icon}
+        </div>
+      )}
+      {isSaving && (
+        <div style={{ flexShrink: 0, paddingTop: '0.4rem', fontSize: '0.6rem', color: 'var(--text-muted)' }}>…</div>
+      )}
+    </div>
+  )
+})
+
+// ─── Main component ───────────────────────────────────────────────────────────
+export default function TimeLedgerPage() {
+  const { user } = useAuth()
+  const todayStr = dateStr(new Date())
+
+  const [selectedDate, setSelectedDate] = useState(todayStr)
+  const [days, setDays]       = useState<Record<string, DayData>>({})
+  const [ghostMap, setGhostMap] = useState<Record<string, string>>({})
+  const [analyzing, setAnalyzing] = useState(false)
+  const [activeSlot, setActiveSlot] = useState<string | null>(null)
+  const [saving, setSaving]   = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [savedFlash, setSavedFlash] = useState(false)
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const daysRef = useRef(days)
+  daysRef.current = days
+
+  // Bulk fill state
+  const [bulkMode, setBulkMode] = useState(false)
+  const [selectedSlots, setSelectedSlots] = useState<Set<string>>(new Set())
+  const [bulkLabel, setBulkLabel] = useState(BULK_LABELS[0])
+  const [bulkApplying, setBulkApplying] = useState(false)
+
+  const isToday = selectedDate === todayStr
+
+  // Exit bulk mode when changing date
+  useEffect(() => { setBulkMode(false); setSelectedSlots(new Set()) }, [selectedDate])
+
+  useEffect(() => { if (user) loadData() }, [user])
+
+  async function loadData() {
+    if (!user) return
+    const cutoff = dateStr(addDays(new Date(), -14))
+    const docs = await queryDocuments('time_ledger', [where('userId', '==', user.uid)])
+    const loaded: Record<string, DayData> = {}
+    const slotFreq: Record<string, Record<string, number>> = {}
+
+    for (const doc of docs) {
+      if (!doc.date) continue
+      loaded[doc.date as string] = {
+        blocks: (doc.blocks as Record<string, Block>) ?? {},
+        mediocreScore: doc.mediocreScore ?? null,
+        status: doc.status ?? null,
+        verdict: doc.verdict,
+        analyzedAt: doc.analyzedAt,
+      }
+      if (doc.date < todayStr && doc.date >= cutoff) {
+        const blocks = (doc.blocks as Record<string, Block>) ?? {}
+        for (const [slot, block] of Object.entries(blocks)) {
+          if (!block.entry?.trim()) continue
+          if (!slotFreq[slot]) slotFreq[slot] = {}
+          const key = block.entry.trim().toLowerCase()
+          slotFreq[slot][key] = (slotFreq[slot][key] ?? 0) + 1
+        }
+      }
+    }
+
+    const ghost: Record<string, string> = {}
+    for (const [slot, freq] of Object.entries(slotFreq)) {
+      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0]
+      if (top && top[1] >= 2) ghost[slot] = top[0]
+    }
+
+    setDays(loaded)
+    setGhostMap(ghost)
+  }
+
+  // Stable callbacks passed to SlotRow — won't cause remount
+  const handleActivate   = useCallback((slot: string) => setActiveSlot(slot), [])
+  const handleDeactivate = useCallback(() => setActiveSlot(null), [])
+  const handleToggleSelect = useCallback((slot: string) => {
+    setSelectedSlots(prev => {
+      const next = new Set(prev)
+      if (next.has(slot)) next.delete(slot); else next.add(slot)
+      return next
+    })
+  }, [])
+
+  const handleUpdate = useCallback((slot: string, entry: string) => {
+    if (!user) return
+
+    setDays(prev => {
+      const cur = prev[selectedDate]?.blocks ?? {}
+      return {
+        ...prev,
+        [selectedDate]: {
+          ...prev[selectedDate],
+          blocks: {
+            ...cur,
+            [slot]: {
+              entry,
+              classification: cur[slot]?.classification ?? null,
+              note: cur[slot]?.note ?? null,
+            },
+          },
+        },
+      }
+    })
+
+    clearTimeout(saveTimers.current[slot])
+    saveTimers.current[slot] = setTimeout(async () => {
+      if (!entry.trim()) return
+      setSaving(slot)
+      setSaveError(null)
+      try {
+        const daySnap = daysRef.current[selectedDate]
+        const curBlocks = daySnap?.blocks ?? {}
+        const updatedBlocks = {
+          ...curBlocks,
+          [slot]: { entry, classification: curBlocks[slot]?.classification ?? null, note: curBlocks[slot]?.note ?? null },
+        }
+        const docId = `${user.uid}_${selectedDate}`
+        await setDocument('time_ledger', docId, {
+          userId: user.uid, date: selectedDate,
+          blocks: updatedBlocks,
+          mediocreScore: daySnap?.mediocreScore ?? null,
+          status: daySnap?.status ?? null,
+          verdict: daySnap?.verdict ?? null,
+          analyzedAt: daySnap?.analyzedAt ?? null,
+        })
+        setSavedFlash(true)
+        setTimeout(() => setSavedFlash(false), 1500)
+      } catch (err: any) {
+        console.error('[TimeLedger] save failed:', err)
+        setSaveError('Save failed — check connection')
+        setTimeout(() => setSaveError(null), 4000)
+      } finally {
+        setSaving(null)
+      }
+    }, 1000)
+  }, [user, selectedDate])
+
+  async function handleBulkApply() {
+    if (!user || selectedSlots.size === 0) return
+    setBulkApplying(true)
+    const slots = Array.from(selectedSlots)
+    // Apply locally
+    setDays(prev => {
+      const cur = prev[selectedDate]?.blocks ?? {}
+      const updated = { ...cur }
+      for (const slot of slots) {
+        updated[slot] = { entry: bulkLabel, classification: cur[slot]?.classification ?? null }
+      }
+      return { ...prev, [selectedDate]: { ...prev[selectedDate], blocks: updated } }
+    })
+    // Save to Firestore
+    try {
+      const daySnap = daysRef.current[selectedDate]
+      const curBlocks = daySnap?.blocks ?? {}
+      const updatedBlocks = { ...curBlocks }
+      for (const slot of slots) {
+        updatedBlocks[slot] = { entry: bulkLabel, classification: curBlocks[slot]?.classification ?? null }
+      }
+      const docId = `${user.uid}_${selectedDate}`
+      await setDocument('time_ledger', docId, {
+        userId: user.uid, date: selectedDate, blocks: updatedBlocks,
+        mediocreScore: daySnap?.mediocreScore ?? null,
+        status: daySnap?.status ?? null,
+        verdict: daySnap?.verdict ?? null,
+        analyzedAt: daySnap?.analyzedAt ?? null,
+      })
+      setSavedFlash(true)
+      setTimeout(() => setSavedFlash(false), 1500)
+    } catch {
+      setSaveError('Bulk save failed'); setTimeout(() => setSaveError(null), 4000)
+    }
+    setBulkApplying(false)
+    setBulkMode(false)
+    setSelectedSlots(new Set())
+  }
+
+  async function quickFillGap(slots: string[], label: string) {
+    if (!user) return
+    setDays(prev => {
+      const cur = prev[selectedDate]?.blocks ?? {}
+      const updated = { ...cur }
+      for (const slot of slots) {
+        updated[slot] = { entry: label, classification: cur[slot]?.classification ?? null }
+      }
+      return { ...prev, [selectedDate]: { ...prev[selectedDate], blocks: updated } }
+    })
+    try {
+      const daySnap = daysRef.current[selectedDate]
+      const curBlocks = { ...daySnap?.blocks ?? {} }
+      for (const slot of slots) {
+        curBlocks[slot] = { entry: label, classification: null }
+      }
+      const docId = `${user.uid}_${selectedDate}`
+      await setDocument('time_ledger', docId, {
+        userId: user.uid, date: selectedDate, blocks: curBlocks,
+        mediocreScore: daySnap?.mediocreScore ?? null,
+        status: daySnap?.status ?? null,
+        verdict: daySnap?.verdict ?? null,
+        analyzedAt: daySnap?.analyzedAt ?? null,
+      })
+      setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1500)
+    } catch {
+      setSaveError('Save failed'); setTimeout(() => setSaveError(null), 4000)
+    }
+  }
+
+  async function analyzeDay() {
+    if (!user) return
+    const dayData = days[selectedDate]
+    const filled = Object.entries(dayData?.blocks ?? {})
+      .filter(([, b]) => b.entry?.trim())
+      .map(([slot, b]) => ({ slot, entry: b.entry }))
+    if (filled.length < 3) { alert('Fill in at least 3 time blocks before analyzing.'); return }
+
+    setAnalyzing(true)
+    try {
+      const res = await fetch('/api/ai/time-ledger-analyze', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks: filled }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+
+      const updatedBlocks = { ...(dayData?.blocks ?? {}) }
+      for (const r of data.results ?? []) {
+        if (updatedBlocks[r.slot]) {
+          updatedBlocks[r.slot] = { ...updatedBlocks[r.slot], classification: r.classification, note: r.note ?? null }
+        }
+      }
+      const docId = `${user.uid}_${selectedDate}`
+      await setDocument('time_ledger', docId, {
+        userId: user.uid, date: selectedDate, blocks: updatedBlocks,
+        mediocreScore: data.mediocreScore ?? null, status: data.status ?? null,
+        verdict: data.verdict ?? null, analyzedAt: new Date().toISOString(),
+      })
+      setDays(prev => ({
+        ...prev,
+        [selectedDate]: { blocks: updatedBlocks, mediocreScore: data.mediocreScore, status: data.status, verdict: data.verdict, analyzedAt: new Date().toISOString() },
+      }))
+    } catch (e: any) { alert('Analysis failed: ' + e.message) }
+    setAnalyzing(false)
+  }
+
+  const dayData: DayData = days[selectedDate] ?? { blocks: {}, mediocreScore: null, status: null }
+  const allBlocks = Object.values(dayData.blocks ?? {}).filter(b => b.entry?.trim())
+  const analyzed  = allBlocks.filter(b => b.classification)
+  const highYield = analyzed.filter(b => b.classification === 'high-yield').length
+  const mainten   = analyzed.filter(b => b.classification === 'maintenance').length
+  const mediocre  = analyzed.filter(b => b.classification === 'mediocre').length
+
+  // Focus Score (only meaningful after analysis)
+  const focusScore = analyzed.length > 0 ? Math.round((highYield / analyzed.length) * 100) : null
+  const focusColor = focusScore === null ? '#6366f1'
+    : focusScore >= 60 ? '#10b981'
+    : focusScore >= 40 ? '#f59e0b'
+    : '#ef4444'
+
+  // Gap Detection — find 3+ consecutive empty past slots (max 2 gaps shown)
+  const gaps: Array<{ slots: string[]; startLabel: string; endLabel: string }> = []
+  if (selectedDate <= todayStr) {
+    const isPastDay = selectedDate < todayStr
+    let run: string[] = []
+    for (const slot of SLOTS) {
+      const isPast = isPastDay || isPastSlot(slot)
+      const isEmpty = !dayData.blocks?.[slot]?.entry?.trim()
+      if (isPast && isEmpty) {
+        run.push(slot)
+      } else {
+        if (run.length >= 3) {
+          gaps.push({ slots: run, startLabel: run[0], endLabel: run[run.length - 1] })
+        }
+        run = []
+      }
+      if (gaps.length >= 2) break
+    }
+    if (run.length >= 3 && gaps.length < 2) {
+      gaps.push({ slots: run, startLabel: run[0], endLabel: run[run.length - 1] })
+    }
+  }
+
+  const statusMeta = dayData.status === 'on-fire'
+    ? { label: '🔥 ON FIRE', color: '#10b981', bg: 'rgba(16,185,129,0.1)' }
+    : dayData.status === 'mediocre'
+    ? { label: '💀 MEDIOCRE STATE', color: '#ef4444', bg: 'rgba(239,68,68,0.1)' }
+    : dayData.status === 'solid'
+    ? { label: '✅ SOLID DAY', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' }
+    : null
+
+  const amSlots = SLOTS.filter(s => parseInt(s) < 12)
+  const pmSlots = SLOTS.filter(s => parseInt(s) >= 12)
+
+  return (
+    <div style={{ maxWidth: 700, margin: '0 auto', padding: '1rem 1rem 8rem' }}>
+
+      {/* Save status toast */}
+      {saveError && (
+        <div style={{ position: 'fixed', top: '4.5rem', left: '50%', transform: 'translateX(-50%)', zIndex: 200,
+          background: '#ef4444', color: '#fff', borderRadius: 10, padding: '0.55rem 1rem',
+          fontSize: '0.78rem', fontWeight: 700, boxShadow: '0 4px 16px rgba(0,0,0,0.25)', whiteSpace: 'nowrap' }}>
+          ⚠️ {saveError}
+        </div>
+      )}
+      {savedFlash && !saveError && (
+        <div style={{ position: 'fixed', top: '4.5rem', left: '50%', transform: 'translateX(-50%)', zIndex: 200,
+          background: '#10b981', color: '#fff', borderRadius: 10, padding: '0.45rem 0.9rem',
+          fontSize: '0.75rem', fontWeight: 700, boxShadow: '0 4px 16px rgba(0,0,0,0.2)', whiteSpace: 'nowrap' }}>
+          ✓ Saved
+        </div>
+      )}
+
+      {/* Bulk Fill sticky bar */}
+      {bulkMode && (
+        <div style={{
+          position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 200, width: 'calc(100% - 2rem)', maxWidth: 500,
+          background: '#1e1b4b', border: '1px solid rgba(99,102,241,0.4)',
+          borderRadius: 14, padding: '0.75rem 1rem',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#a5b4fc', flexShrink: 0 }}>
+            {selectedSlots.size} selected
+          </span>
+          <span style={{ fontSize: '0.75rem', color: '#64748b', flexShrink: 0 }}>Label as:</span>
+          <select
+            value={bulkLabel}
+            onChange={e => setBulkLabel(e.target.value)}
+            style={{
+              flex: 1, minWidth: 100, padding: '0.35rem 0.5rem', borderRadius: 8,
+              background: '#0f172a', border: '1px solid rgba(99,102,241,0.3)',
+              color: '#e2e8f0', fontSize: '0.8rem', outline: 'none',
+            }}
+          >
+            {BULK_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
+          </select>
+          <button
+            onClick={handleBulkApply}
+            disabled={selectedSlots.size === 0 || bulkApplying}
+            style={{
+              padding: '0.4rem 0.85rem', borderRadius: 8, fontWeight: 700,
+              fontSize: '0.8rem', border: 'none', cursor: 'pointer',
+              background: selectedSlots.size > 0 ? '#6366f1' : '#334155',
+              color: '#fff', opacity: bulkApplying ? 0.6 : 1, flexShrink: 0,
+            }}
+          >
+            {bulkApplying ? 'Applying…' : 'Apply'}
+          </button>
+          <button
+            onClick={() => { setBulkMode(false); setSelectedSlots(new Set()) }}
+            style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '1rem', flexShrink: 0 }}
+          >✕</button>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div>
+          <h1 style={{ fontSize: '1.4rem', fontWeight: 800, margin: 0 }}>🕐 Time Ledger</h1>
+          <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: '0.2rem 0 0' }}>
+            48 blocks · 30 min each · {allBlocks.length} filled · {analyzed.length} analyzed
+            {saving && <span style={{ color: '#14b8a6', marginLeft: '0.4rem' }}>· saving…</span>}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => { setBulkMode(b => !b); setSelectedSlots(new Set()) }}
+            style={{
+              background: bulkMode ? 'rgba(99,102,241,0.2)' : 'var(--surface)',
+              color: bulkMode ? '#a5b4fc' : 'var(--text-muted)',
+              border: `1px solid ${bulkMode ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`,
+              borderRadius: 8, padding: '0.5rem 0.85rem',
+              fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer',
+            }}
+          >
+            {bulkMode ? '✕ Cancel' : '☑ Bulk Fill'}
+          </button>
+          <button onClick={analyzeDay} disabled={analyzing || allBlocks.length < 3} style={{
+            background: analyzing ? 'var(--surface-2)' : '#6366f1',
+            color: analyzing ? 'var(--text-muted)' : '#fff',
+            border: 'none', borderRadius: 8, padding: '0.5rem 1rem',
+            fontWeight: 700, fontSize: '0.8rem', cursor: analyzing ? 'wait' : 'pointer',
+          }}>
+            {analyzing ? '🤖 Analyzing…' : '🤖 AI Analyze Day'}
+          </button>
+        </div>
+      </div>
+
+      {/* Date navigation */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button onClick={() => setSelectedDate(dateStr(addDays(new Date(selectedDate), -1)))}
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.4rem 0.75rem', cursor: 'pointer', fontWeight: 700 }}>←</button>
+        <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)}
+          style={{ flex: 1, padding: '0.4rem 0.75rem', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-primary)', fontSize: '0.85rem', outline: 'none' }} />
+        <button onClick={() => setSelectedDate(dateStr(addDays(new Date(selectedDate), 1)))}
+          disabled={selectedDate >= todayStr}
+          style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '0.4rem 0.75rem', cursor: selectedDate >= todayStr ? 'default' : 'pointer', opacity: selectedDate >= todayStr ? 0.4 : 1, fontWeight: 700 }}>→</button>
+        {selectedDate !== todayStr && (
+          <button onClick={() => setSelectedDate(todayStr)}
+            style={{ background: 'rgba(20,184,166,0.1)', border: '1px solid rgba(20,184,166,0.3)', borderRadius: 8, padding: '0.4rem 0.75rem', cursor: 'pointer', fontSize: '0.78rem', color: '#14b8a6', fontWeight: 700 }}>Today</button>
+        )}
+      </div>
+
+      {/* Status card */}
+      {statusMeta && (
+        <div style={{ background: statusMeta.bg, border: `1px solid ${statusMeta.color}30`, borderRadius: 12, padding: '0.75rem 1rem', marginBottom: '0.85rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: dayData.verdict ? '0.4rem' : 0 }}>
+            <span style={{ fontWeight: 800, color: statusMeta.color, fontSize: '0.9rem' }}>{statusMeta.label}</span>
+            {dayData.mediocreScore !== null && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Mediocre: <strong style={{ color: dayData.mediocreScore > 40 ? '#ef4444' : '#10b981' }}>{dayData.mediocreScore}%</strong>
+              </span>
+            )}
+          </div>
+          {dayData.verdict && <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: 0, fontStyle: 'italic' }}>"{dayData.verdict}"</p>}
+        </div>
+      )}
+
+      {/* Gap Detection banners */}
+      {gaps.map((gap, i) => {
+        const mins = gap.slots.length * 30
+        const label = mins >= 60 ? `${mins / 60}h` : `${mins}min`
+        return (
+          <div key={i} style={{
+            background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)',
+            borderRadius: 12, padding: '0.65rem 1rem', marginBottom: '0.6rem',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#f59e0b' }}>
+                ⚠️ {label} gap ({gap.startLabel}–{gap.endLabel})
+              </span>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', flex: 1 }}>Backfill with:</span>
+              {['Deep Work', 'Sleep', 'Break', 'Other'].map(chip => (
+                <button
+                  key={chip}
+                  onClick={() => quickFillGap(gap.slots, chip)}
+                  style={{
+                    padding: '0.25rem 0.6rem', borderRadius: 6, fontSize: '0.72rem', fontWeight: 600,
+                    border: '1px solid rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.1)',
+                    color: '#f59e0b', cursor: 'pointer',
+                  }}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+
+      {/* Stats */}
+      {analyzed.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '0.4rem', marginBottom: '0.85rem' }}>
+          {[
+            { label: '🔥 High Yield', val: highYield, color: '#10b981' },
+            { label: '⚙️ Maintenance', val: mainten,  color: '#f59e0b' },
+            { label: '💀 Mediocre',   val: mediocre,  color: '#ef4444' },
+          ].map(s => (
+            <div key={s.label} style={{ background: 'var(--surface)', border: `1px solid ${s.color}20`, borderRadius: 10, padding: '0.5rem', textAlign: 'center' }}>
+              <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', margin: '0 0 0.15rem' }}>{s.label}</p>
+              <p style={{ fontSize: '1.2rem', fontWeight: 800, color: s.color, margin: 0 }}>{s.val}</p>
+              <p style={{ fontSize: '0.58rem', color: 'var(--text-muted)', margin: 0 }}>{Math.round(s.val * 0.5 * 10) / 10}h</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Day progress bar */}
+      {isToday && (() => {
+        const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes()
+        const pct = Math.round((nowMin / 1440) * 100)
+        const filled = Math.round((allBlocks.length / 48) * 100)
+        return (
+          <div style={{ marginBottom: '0.6rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
+              <span>Day elapsed: {pct}%</span>
+              <span>Blocks filled: {allBlocks.length}/48</span>
+            </div>
+            <div style={{ height: 6, background: 'var(--surface-2)', borderRadius: 99, overflow: 'hidden', position: 'relative' }}>
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${pct}%`, background: 'rgba(99,102,241,0.25)', borderRadius: 99 }} />
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${filled}%`, background: '#14b8a6', borderRadius: 99, opacity: 0.8 }} />
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Focus Score */}
+      {focusScore !== null && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.6rem', padding: '0.5rem 0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10 }}>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>🎯 Focus Score</span>
+          <div style={{ flex: 1, height: 6, background: 'var(--surface-2)', borderRadius: 99, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${focusScore}%`, background: focusColor, borderRadius: 99, transition: 'width 0.6s ease' }} />
+          </div>
+          <span style={{ fontSize: '0.82rem', fontWeight: 800, color: focusColor, minWidth: 36, textAlign: 'right' }}>{focusScore}%</span>
+          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>({highYield}/{analyzed.length} blocks)</span>
+        </div>
+      )}
+
+      {/* Burn-down bar (today only) */}
+      {isToday && (() => {
+        const now = new Date()
+        const hour = now.getHours()
+        const minPast = now.getMinutes()
+        const WORK_START = 8, WORK_END = 22
+        const totalWorkBlocks = (WORK_END - WORK_START) * 2 // 28
+        // Count elapsed work slots (past slots between 8am–10pm)
+        const elapsedWork = SLOTS.filter(slot => {
+          const [sh] = slot.split(':').map(Number)
+          return sh >= WORK_START && sh < WORK_END && isPastSlot(slot)
+        }).length
+        const productiveLeft = Math.max(0, totalWorkBlocks - elapsedWork - highYield)
+        const pct = Math.round((productiveLeft / totalWorkBlocks) * 100)
+        if (hour < WORK_START || hour >= WORK_END) return null
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.85rem', padding: '0.5rem 0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10 }}>
+            <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600, whiteSpace: 'nowrap' }}>⚡ Productive left</span>
+            <div style={{ flex: 1, height: 6, background: 'var(--surface-2)', borderRadius: 99, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${pct}%`, background: '#6366f1', borderRadius: 99, transition: 'width 0.6s ease' }} />
+            </div>
+            <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#6366f1', minWidth: 36, textAlign: 'right' }}>{productiveLeft}</span>
+            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>of {totalWorkBlocks} blocks</span>
+          </div>
+        )
+      })()}
+
+      {/* AM grid */}
+      <div className="card" style={{ padding: '0.5rem', marginBottom: '0.5rem' }}>
+        <p style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.3rem 0.5rem' }}>🌅 AM</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+          {amSlots.map(slot => (
+            <SlotRow key={slot} slot={slot}
+              block={dayData.blocks?.[slot]}
+              ghost={ghostMap[slot]}
+              isActive={activeSlot === slot}
+              isToday={isToday}
+              isPast={isToday ? isPastSlot(slot) : selectedDate < todayStr}
+              isSaving={saving === slot}
+              bulkMode={bulkMode}
+              isSelected={selectedSlots.has(slot)}
+              onActivate={handleActivate}
+              onDeactivate={handleDeactivate}
+              onUpdate={handleUpdate}
+              onToggleSelect={handleToggleSelect}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* PM grid */}
+      <div className="card" style={{ padding: '0.5rem', marginBottom: '1rem' }}>
+        <p style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '0 0 0.3rem 0.5rem' }}>🌙 PM</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+          {pmSlots.map(slot => (
+            <SlotRow key={slot} slot={slot}
+              block={dayData.blocks?.[slot]}
+              ghost={ghostMap[slot]}
+              isActive={activeSlot === slot}
+              isToday={isToday}
+              isPast={isToday ? isPastSlot(slot) : selectedDate < todayStr}
+              isSaving={saving === slot}
+              bulkMode={bulkMode}
+              isSelected={selectedSlots.has(slot)}
+              onActivate={handleActivate}
+              onDeactivate={handleDeactivate}
+              onUpdate={handleUpdate}
+              onToggleSelect={handleToggleSelect}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+        {Object.entries(CLASS_META).map(([key, m]) => (
+          <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.7rem', color: m.color, fontWeight: 600 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: m.color }} />
+            {m.label}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

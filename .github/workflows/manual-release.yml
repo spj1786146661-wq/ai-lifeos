@@ -1,0 +1,239 @@
+name: Manual production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Exact annotated version tag to build and deploy (for example v0.2.0-beta.1)"
+        required: true
+        type: string
+      confirmation:
+        description: "Type DEPLOY followed by the exact tag, for example: DEPLOY v0.2.0-beta.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-lifeos-production-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24.22.0"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  build:
+    name: Build and verify tagged source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      source_url: ${{ steps.release.outputs.source_url }}
+      archive_sha256: ${{ steps.package.outputs.archive_sha256 }}
+    steps:
+      - name: Check confirmation phrase
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          expected="DEPLOY ${RELEASE_TAG}"
+          if [[ "${CONFIRMATION}" != "${expected}" ]]; then
+            echo "::error::Confirmation must exactly match '${expected}'."
+            exit 1
+          fi
+
+      - name: Check out exact release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag and public AGPL source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/release/check-release-source.mjs --tag "${RELEASE_TAG}"
+
+          tag_type="$(git cat-file -t "refs/tags/${RELEASE_TAG}")"
+          if [[ "${tag_type}" != "tag" ]]; then
+            echo "::error::${RELEASE_TAG} must be an annotated tag."
+            exit 1
+          fi
+
+          private="$(gh api "repos/${REPOSITORY}" --jq .private)"
+          if [[ "${private}" != "false" ]]; then
+            echo "::error::The release repository must be public so the deployed AGPL Corresponding Source is accessible."
+            exit 1
+          fi
+
+      - name: Set release metadata
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          short_sha="${commit:0:12}"
+          safe_tag="${RELEASE_TAG//[^A-Za-z0-9._-]/-}"
+          release_id="${safe_tag}-${short_sha}-r${RUN_ID}-${RUN_ATTEMPT}"
+          source_url="https://github.com/${REPOSITORY}/tree/${RELEASE_TAG}"
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "source_url=${source_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run serial full regression
+        run: node --test --test-concurrency=1 tests/*.test.mjs
+
+      - name: Type-check
+        run: ./node_modules/.bin/tsc --noEmit
+
+      - name: Check generated shell and Node scripts
+        run: |
+          set -euo pipefail
+          bash -n scripts/release/server/deploy-release.sh
+          bash -n scripts/release/server/rollback-release.sh
+          node --check scripts/release/check-release-source.mjs
+          node --check scripts/release/package-release.mjs
+
+      - name: Build production output
+        env:
+          AIOS_PUBLIC_BETA_HOSTS: ${{ vars.PUBLIC_BETA_HOST }}
+          AIOS_PUBLIC_BETA_RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          AIOS_PUBLIC_BETA_SOURCE_URL: ${{ steps.release.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AIOS_PUBLIC_BETA_HOSTS}" ]]; then
+            echo "::error::Repository variable PUBLIC_BETA_HOST is required."
+            exit 1
+          fi
+          npm run build -- --webpack
+
+      - name: Package release and record checksum
+        id: package
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          SOURCE_URL: ${{ steps.release.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          node scripts/release/package-release.mjs \
+            --tag "${RELEASE_TAG}" \
+            --release-id "${RELEASE_ID}" \
+            --source-url "${SOURCE_URL}" \
+            --output release-artifacts/release.tar.gz \
+            --manifest release-artifacts/release.json
+          sha="$(node -e "const m=require('./release-artifacts/release.json'); process.stdout.write(m.archiveSha256)")"
+          echo "archive_sha256=${sha}" >> "$GITHUB_OUTPUT"
+          cat release-artifacts/release.json
+
+      - name: Upload immutable release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: aios-release-${{ steps.release.outputs.release_id }}
+          path: |
+            release-artifacts/release.tar.gz
+            release-artifacts/release.json
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy after production approval
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: aios-release-${{ needs.build.outputs.release_id }}
+          path: release-artifacts
+
+      - name: Configure SSH without weakening host verification
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DEPLOY_SSH_KEY}" || -z "${DEPLOY_KNOWN_HOSTS}" ]]; then
+            echo "::error::DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS must be configured in the production environment."
+            exit 1
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "$HOME/.ssh/aios_deploy_key"
+          chmod 600 "$HOME/.ssh/aios_deploy_key"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Upload bundle to the server inbox
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          port="${DEPLOY_PORT:-22}"
+          deploy_path="${DEPLOY_PATH:-/srv/ai-lifeos}"
+          [[ "${DEPLOY_HOST}" =~ ^[A-Za-z0-9.:-]+$ ]] || { echo "::error::Invalid DEPLOY_HOST."; exit 1; }
+          [[ "${DEPLOY_USER}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "::error::Invalid DEPLOY_USER."; exit 1; }
+          [[ "${port}" =~ ^[0-9]{1,5}$ ]] || { echo "::error::Invalid DEPLOY_PORT."; exit 1; }
+          [[ "${deploy_path}" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "::error::Invalid DEPLOY_PATH."; exit 1; }
+
+          scp -i "$HOME/.ssh/aios_deploy_key" \
+            -P "${port}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            release-artifacts/release.tar.gz \
+            release-artifacts/release.json \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${deploy_path}/incoming/"
+
+      - name: Switch server release with automatic failure rollback
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+          port="${DEPLOY_PORT:-22}"
+          ssh -i "$HOME/.ssh/aios_deploy_key" \
+            -p "${port}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "sudo -n /usr/local/sbin/aios-deploy-release"
+
+      - name: Verify public release and source notice
+        env:
+          PUBLIC_BETA_HOST: ${{ vars.PUBLIC_BETA_HOST }}
+          RELEASE_ID: ${{ needs.build.outputs.release_id }}
+          SOURCE_URL: ${{ needs.build.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PUBLIC_BETA_HOST}" ]] || { echo "::error::PUBLIC_BETA_HOST is required."; exit 1; }
+          curl --fail --silent --show-error --retry 5 --retry-all-errors \
+            "https://${PUBLIC_BETA_HOST}/" >/dev/null
+          source_body="$(curl --fail --silent --show-error "https://${PUBLIC_BETA_HOST}/source")"
+          grep -F -- "${RELEASE_ID}" <<< "${source_body}" >/dev/null
+          grep -F -- "${SOURCE_URL}" <<< "${source_body}" >/dev/null

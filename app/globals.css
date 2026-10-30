@@ -1,0 +1,372 @@
+@import "tailwindcss";
+
+/* ─── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  /* Primary: Teal (brand colour, P1 badges, CTAs) */
+  --color-primary: #14b8a6;
+  --color-primary-dark: #0d9488;
+
+  /* Semantic colours */
+  --color-success: #22c55e;   /* Green — completed, streaks */
+  --color-warning: #f59e0b;   /* Amber — behind pace, warnings */
+  --color-danger: #ef4444;    /* Red — missed, overdue */
+  --color-xp: #a855f7;        /* Purple — XP / gamification */
+
+  /* Light mode */
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --border: #e2e8f0;
+  --foreground: #0f172a;
+  --muted: #64748b;
+}
+
+.dark {
+  --background: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --border: #334155;
+  --foreground: #f1f5f9;
+  --muted: #94a3b8;
+}
+
+/* ─── Base styles ────────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── PWA safe areas (notch / home indicator) ────────────────────────────────── */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.pb-safe {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 5rem);
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+/* ─── Animations ─────────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+}
+
+@keyframes xp-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+
+.animate-fade-in   { animation: fadeIn 0.3s ease forwards; }
+.animate-slide-up  { animation: slideUp 0.4s ease forwards; }
+.animate-pulse-green { animation: pulse-green 1s ease 1; }
+.animate-xp-pop    { animation: xp-pop 0.3s ease; }
+
+/* ─── Habit completion micro-interaction ─────────────────────────────────── */
+@keyframes habit-done {
+  0%   { transform: scale(1); }
+  30%  { transform: scale(1.12); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); }
+  60%  { transform: scale(0.97); box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+  100% { transform: scale(1); box-shadow: none; }
+}
+@keyframes confetti-pop {
+  0%   { transform: scale(0) rotate(0deg); opacity: 1; }
+  100% { transform: scale(1.5) rotate(180deg); opacity: 0; }
+}
+@keyframes glow-in {
+  from { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+  to   { box-shadow: 0 0 0 6px rgba(34,197,94,0); }
+}
+.habit-complete-anim { animation: habit-done 0.45s cubic-bezier(.36,.07,.19,.97) forwards; }
+.glow-green { animation: glow-in 0.4s ease forwards; }
+
+/* ─── Glassmorphism card variant ─────────────────────────────────────────── */
+.card-glass {
+  background: rgba(255,255,255,0.06);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 16px;
+}
+.dark .card-glass {
+  background: rgba(30,41,59,0.7);
+  border-color: rgba(255,255,255,0.08);
+}
+
+/* ─── Button press effect ────────────────────────────────────────────────── */
+button:active:not(:disabled) { transform: scale(0.97); }
+a:active { opacity: 0.75; }
+
+/* ─── Utility classes ────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  padding: 1rem;
+}
+
+.card-sm {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+}
+
+.text-muted {
+  color: var(--muted);
+}
+
+/* Local Life Data Capsule shell. Scoped so original LifeTracker pages retain their theme. */
+.capsule-shell {
+  --surface: #0d1a32;
+  --surface-2: #1d2c49;
+  --border: rgba(103, 232, 249, 0.2);
+  --foreground: #f1f5ff;
+  --muted: #a9bad2;
+  background:
+    radial-gradient(circle at 12% 4%, rgba(9, 127, 160, 0.19), transparent 36rem),
+    radial-gradient(circle at 95% 22%, rgba(103, 38, 154, 0.18), transparent 38rem),
+    #070d1b;
+}
+.capsule-shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(64, 178, 210, .04) 1px, transparent 1px), linear-gradient(90deg, rgba(64, 178, 210, .04) 1px, transparent 1px);
+  background-size: 34px 34px;
+}
+.capsule-shell .card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.capsule-shell input, .capsule-shell select, .capsule-shell textarea {
+  color-scheme: dark;
+}
+
+/* 长候选列表：桌面显示可拖动滚动条，手机保留自然的触摸滚动。 */
+.capture-scroll {
+  scrollbar-color: rgba(103, 232, 249, .55) rgba(7, 19, 38, .4);
+  scrollbar-width: thin;
+}
+.capture-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.capture-scroll::-webkit-scrollbar-track {
+  background: rgba(7, 19, 38, .45);
+}
+.capture-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(7, 19, 38, .45);
+  border-radius: 999px;
+  background: rgba(103, 232, 249, .55);
+}
+
+/* 固定输入区与正文滚动区隔离，避免长候选列表的按钮被输入框覆盖。 */
+.capture-composer {
+  box-shadow: 0 -18px 40px rgba(3, 10, 24, .32);
+}
+
+.badge-p1 {
+  background: rgba(20, 184, 166, 0.15);
+  color: #14b8a6;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+
+.badge-p2, .badge-p3 {
+  background: rgba(100, 116, 139, 0.15);
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+
+/* ─── Bottom navigation safe area ───────────────────────────────────────────── */
+.bottom-nav-height {
+  height: calc(4rem + env(safe-area-inset-bottom));
+}
+
+/* ─── Responsive layout ──────────────────────────────────────────────────────── */
+
+/* On desktop: main content starts after the 220px sidebar */
+@media (min-width: 1024px) {
+  .lg\:app-main-desktop {
+    margin-left: 220px;
+  }
+
+  /* Override the mobile bottom-nav safe-area padding on desktop */
+  .pb-safe {
+    padding-bottom: 3rem;
+  }
+}
+
+/* ─── Floating Action Buttons ────────────────────────────────────────────────── */
+
+/* Mobile: sit above the bottom nav (4.5rem + safe area) */
+.fab-bottom {
+  bottom: calc(4.5rem + env(safe-area-inset-bottom));
+}
+
+/* Panic button: mobile left, desktop right (both above sidebar) */
+.fab-panic-position {
+  left: 1rem;
+}
+
+@media (min-width: 1024px) {
+  /* Desktop: just sit 2rem from the bottom, no bottom nav to clear */
+  .fab-bottom {
+    bottom: 2rem;
+  }
+  /* Move panic button to right side on desktop so it doesn't float over sidebar */
+  .fab-panic-position {
+    left: auto;
+    right: 5rem; /* 3rem gap from the quick-add button */
+  }
+}
+
+/* ─── Responsive grid helpers ────────────────────────────────────────────────── */
+
+/* Two-column content layout used on Today and other wide pages */
+.desktop-two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (min-width: 1024px) {
+  .desktop-two-col {
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 1.5rem;
+    align-items: start;
+  }
+}
+
+/* Wider card padding on desktop */
+@media (min-width: 1024px) {
+  .card {
+    padding: 1.25rem;
+  }
+  .card-sm {
+    padding: 1rem;
+  }
+}
+
+/* ─── iOS 风格页面过渡与日历动效 ─────────────────────────────────────────────
+   只使用 transform 与 opacity，避免触发布局重排。
+   页面切换动画与日历业务逻辑分离，方便未来在 APP 和小程序中替换实现。 */
+@keyframes aios-page-in-right {
+  from { transform: translate3d(100%, 0, 0); }
+  to   { transform: translate3d(0, 0, 0); }
+}
+@keyframes aios-page-out-right {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(100%, 0, 0); }
+}
+@keyframes aios-page-in-left {
+  from { transform: translate3d(-22%, 0, 0); opacity: 0.55; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+@keyframes aios-page-restore {
+  from { transform: translate3d(-22%, 0, 0); opacity: 0.55; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+@keyframes aios-month-in-left {
+  from { transform: translate3d(14%, 0, 0); opacity: 0; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+@keyframes aios-month-in-right {
+  from { transform: translate3d(-14%, 0, 0); opacity: 0; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+@keyframes aios-day-select {
+  0%   { transform: scale(0.86); }
+  60%  { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+@keyframes aios-list-enter {
+  from { transform: translate3d(0, 8px, 0); opacity: 0; }
+  to   { transform: translate3d(0, 0, 0); opacity: 1; }
+}
+
+.aios-page-enter { animation: aios-page-in-right 300ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-page-exit  { animation: aios-page-out-right 300ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-page-under { animation: aios-page-in-left 300ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-page-restore { animation: aios-page-restore 300ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-month-next { animation: aios-month-in-left 260ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-month-prev { animation: aios-month-in-right 260ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.aios-day-pop    { animation: aios-day-select 180ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.aios-list-enter { animation: aios-list-enter 220ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+
+/* 日期格按下反馈：只改 transform，不引起重排。 */
+.aios-day-cell { transition: transform 140ms cubic-bezier(0.32, 0.72, 0, 1), background-color 160ms ease; }
+.aios-day-cell:active { transform: scale(0.92); }
+
+/* 分类卡片按下反馈，保持克制，不明显弹跳。 */
+.aios-type-card { transition: transform 140ms cubic-bezier(0.32, 0.72, 0, 1), border-color 160ms ease, background-color 160ms ease; }
+.aios-type-card:active { transform: scale(0.96); }
+
+/* 月份切换容器：纵向滚动交给浏览器，横向手势由 JS 处理。 */
+.aios-month-track { touch-action: pan-y; }
+
+/* 尊重系统减少动态效果设置：关闭非必要动画，保留可用性。 */
+@media (prefers-reduced-motion: reduce) {
+  .aios-page-enter,
+  .aios-page-exit,
+  .aios-page-under,
+  .aios-page-restore,
+  .aios-month-next,
+  .aios-month-prev,
+  .aios-day-pop,
+  .aios-list-enter { animation-duration: 1ms !important; animation-delay: 0ms !important; }
+  .aios-day-cell,
+  .aios-type-card { transition-duration: 1ms !important; }
+  .aios-day-cell:active,
+  .aios-type-card:active { transform: none; }
+}
+
+/* 日历和统计卡片中的光晕只做装饰；任何浏览器取整误差都不得产生横向拖动。 */
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}

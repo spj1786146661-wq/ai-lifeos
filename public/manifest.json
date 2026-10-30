@@ -1,0 +1,57 @@
+{
+  "name": "AI人生数据库",
+  "short_name": "AI人生",
+  "description": "AI记录人生，AI改变人生",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#14b8a6",
+  "orientation": "portrait",
+  "categories": ["productivity", "health", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icons/icon-72x72.png",
+      "sizes": "72x72",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-96x96.png",
+      "sizes": "96x96",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-128x128.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "AI人生数据库",
+      "url": "/",
+      "description": "记录今天的生活"
+    },
+    {
+      "name": "专注模式（原版）",
+      "url": "/now",
+      "description": "专注于一项任务"
+    },
+    {
+      "name": "仪表盘（原版）",
+      "url": "/dashboard",
+      "description": "查看原版进度"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+name: Manual production rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type ROLLBACK PREVIOUS to restore the last known good release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-lifeos-production-release
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Roll back one release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Check confirmation phrase
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "${CONFIRMATION}" != "ROLLBACK PREVIOUS" ]]; then
+            echo "::error::Confirmation must be exactly 'ROLLBACK PREVIOUS'."
+            exit 1
+          fi
+
+      - name: Configure SSH without weakening host verification
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DEPLOY_SSH_KEY}" || -z "${DEPLOY_KNOWN_HOSTS}" ]]; then
+            echo "::error::DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS must be configured in the production environment."
+            exit 1
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > "$HOME/.ssh/aios_deploy_key"
+          chmod 600 "$HOME/.ssh/aios_deploy_key"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Restore previous known good release
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+          port="${DEPLOY_PORT:-22}"
+          ssh -i "$HOME/.ssh/aios_deploy_key" \
+            -p "${port}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "sudo -n /usr/local/sbin/aios-rollback-release"
+
+      - name: Verify public service
+        env:
+          PUBLIC_BETA_HOST: ${{ vars.PUBLIC_BETA_HOST }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 5 --retry-all-errors \
+            "https://${PUBLIC_BETA_HOST}/" >/dev/null
