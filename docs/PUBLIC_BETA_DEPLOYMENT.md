@@ -115,11 +115,21 @@ GitHub Repository variable `PUBLIC_BETA_HOST` 可以包含反向代理公网端�
 Xray 或持久环境文件。上线前仍需在服务器做一次只读核对，确认这些
 入口最终转发到 `127.0.0.1:3000`，并确认 `3001` 没有被其他服务占用。
 
-从现有 NVM 服务首次迁移时，必须先把原
-`/etc/systemd/system/ai-lifeos.service` 备份到
-`/etc/ai-lifeos/legacy/ai-lifeos.service`，并临时设置
-`AIOS_LEGACY_MIGRATION=1`。首次切换失败会恢复旧 unit 并重启原服务；
-备份缺失、存在 systemd drop-in 或旧服务不健康时会在切换前拒绝迁移。
+从现有 NVM 服务首次迁移时，必须先把原 unit 和当前已审查的
+`ai-lifeos.service.d/10-public-beta.conf` 分别备份到
+`/etc/ai-lifeos/legacy/ai-lifeos.service` 和
+`/etc/ai-lifeos/legacy/10-public-beta.conf`，再临时设置
+`AIOS_LEGACY_MIGRATION=1`。备份目录必须为 root 所有、权限 `0700`；
+两个备份文件必须为 root 所有、权限 `0600`，且 live drop-in 与备份逐字节
+一致。只支持这一个已备份的 drop-in；出现额外 drop-in 会在切换前停止。
+
+候选 `3001` 失败时，脚本恢复旧 unit、重新加载 systemd、重启旧服务并
+检查 `127.0.0.1:3000`。候选通过后，脚本先把整个 drop-in 目录移动到
+`/etc/ai-lifeos/legacy/retired/`，确认 managed service 不再加载它。新版
+正式服务健康检查失败时，脚本先把该目录移回原位置，再恢复旧 unit 并
+重启验证。备份缺失或不一致、权限不安全、systemd 未加载已审查 drop-in
+或旧服务不健康时，脚本会在修改正式服务前拒绝迁移。旧备份和成功迁移后
+保留的隔离目录不得覆盖或删除。
 
 ## 发布包边界
 

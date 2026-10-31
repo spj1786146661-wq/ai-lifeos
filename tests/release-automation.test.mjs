@@ -30,6 +30,18 @@ const installNodeScriptPath = path.join(
 const deployScript = fs.readFileSync(deployScriptPath, 'utf8')
 const rollbackScript = fs.readFileSync(rollbackScriptPath, 'utf8')
 const installNodeScript = fs.readFileSync(installNodeScriptPath, 'utf8')
+const bashExecutable = (() => {
+  const candidates = ['bash']
+  if (process.platform === 'win32') {
+    candidates.push('C:\\Program Files\\Git\\bin\\bash.exe')
+  }
+  for (const candidate of candidates) {
+    if (candidate.includes('\\') && !fs.existsSync(candidate)) continue
+    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8' })
+    if (!probe.error && probe.status === 0) return candidate
+  }
+  return null
+})()
 const deployConfig = fs.readFileSync(
   path.join(root, 'scripts/release/deploy.conf.example'),
   'utf8',
@@ -82,7 +94,7 @@ test('server scripts use lock, checksum, health checks, and automatic rollback',
   assert.match(rollbackScript, /original release was restored/)
 })
 
-test('first migration fails closed and restores the legacy systemd unit', () => {
+test('first migration validates and restores the legacy unit and reviewed drop-in', () => {
   assert.match(deployConfig, /AIOS_LEGACY_MIGRATION=0/)
   assert.match(
     deployConfig,
@@ -90,16 +102,36 @@ test('first migration fails closed and restores the legacy systemd unit', () => 
   )
   assert.match(
     deployConfig,
+    /AIOS_SYSTEMD_DROPIN_FILE=\/etc\/systemd\/system\/ai-lifeos\.service\.d\/10-public-beta\.conf/,
+  )
+  assert.match(
+    deployConfig,
     /AIOS_LEGACY_UNIT_BACKUP=\/etc\/ai-lifeos\/legacy\/ai-lifeos\.service/,
+  )
+  assert.match(
+    deployConfig,
+    /AIOS_LEGACY_DROPIN_BACKUP=\/etc\/ai-lifeos\/legacy\/10-public-beta\.conf/,
+  )
+  assert.match(
+    deployConfig,
+    /AIOS_LEGACY_RETIRED_DROPIN_ROOT=\/etc\/ai-lifeos\/legacy\/retired/,
   )
   assert.match(deployScript, /an active unmanaged service exists/)
   assert.match(deployScript, /legacy unit backup must differ from the new managed unit/)
-  assert.match(deployScript, /legacy migration does not support unreviewed systemd drop-ins/)
+  assert.match(deployScript, /legacy drop-in backup does not match the live drop-in/)
+  assert.match(deployScript, /! -L "\$\{SYSTEMD_DROPIN_FILE\}"/)
+  assert.match(
+    deployScript,
+    /legacy migration requires a complete backup for every live systemd drop-in/,
+  )
+  assert.match(deployScript, /retire_legacy_dropin/)
+  assert.match(deployScript, /DropInPaths/)
   assert.match(deployScript, /RESTORE_LEGACY_ON_FAILURE=1/)
   assert.match(deployScript, /restore_legacy_service/)
   assert.match(deployScript, /install -o root -g root -m 0644/)
   assert.match(deployScript, /systemctl daemon-reload/)
   assert.match(deployScript, /legacy service restored after failed first migration/)
+  assert.match(deployScript, /critical: automatic legacy service restoration failed/)
   assert.match(deployScript, /DEPLOY_SUCCEEDED=1/)
 })
 
@@ -271,13 +303,12 @@ test('sensitive scanner catches high-confidence secrets and permits synthetic fi
 })
 
 test('shell scripts parse with bash when available', t => {
-  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' })
-  if (probe.error?.code === 'ENOENT') {
+  if (!bashExecutable) {
     t.skip('bash is not installed in this environment')
     return
   }
   for (const scriptPath of [deployScriptPath, rollbackScriptPath, installNodeScriptPath]) {
-    const result = spawnSync('bash', ['-n', scriptPath], { encoding: 'utf8' })
+    const result = spawnSync(bashExecutable, ['-n', scriptPath], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
   }
 })

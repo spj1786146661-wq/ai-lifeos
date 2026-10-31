@@ -17,5 +17,11 @@ AIOS_NODE_ROOT=/opt/ai-lifeos/node
 AIOS_NODE_BIN=/opt/ai-lifeos/node/bin/node
 AIOS_NPM_CLI=/opt/ai-lifeos/node/lib/node_modules/npm/bin/npm-cli.js
 AIOS_LEGACY_MIGRATION=0
+# First migration only: backups are root:root, directory 0700, files 0600.
+# The script accepts only the single reviewed 10-public-beta.conf drop-in.
 AIOS_SYSTEMD_UNIT_FILE=/etc/systemd/system/ai-lifeos.service
+AIOS_SYSTEMD_DROPIN_DIR=/etc/systemd/system/ai-lifeos.service.d
+AIOS_SYSTEMD_DROPIN_FILE=/etc/systemd/system/ai-lifeos.service.d/10-public-beta.conf
 AIOS_LEGACY_UNIT_BACKUP=/etc/ai-lifeos/legacy/ai-lifeos.service
+AIOS_LEGACY_DROPIN_BACKUP=/etc/ai-lifeos/legacy/10-public-beta.conf
+AIOS_LEGACY_RETIRED_DROPIN_ROOT=/etc/ai-lifeos/legacy/retired

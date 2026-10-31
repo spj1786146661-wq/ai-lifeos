@@ -23,8 +23,14 @@ NODE_ROOT="${AIOS_NODE_ROOT:-/opt/ai-lifeos/node}"
 NODE_BIN="${AIOS_NODE_BIN:-${NODE_ROOT}/bin/node}"
 NPM_CLI="${AIOS_NPM_CLI:-${NODE_ROOT}/lib/node_modules/npm/bin/npm-cli.js}"
 LEGACY_MIGRATION="${AIOS_LEGACY_MIGRATION:-0}"
-SYSTEMD_UNIT_FILE="${AIOS_SYSTEMD_UNIT_FILE:-/etc/systemd/system/ai-lifeos.service}"
-LEGACY_UNIT_BACKUP="${AIOS_LEGACY_UNIT_BACKUP:-/etc/ai-lifeos/legacy/ai-lifeos.service}"
+SYSTEMD_ROOT="${AIOS_SYSTEMD_ROOT:-/etc/systemd/system}"
+LEGACY_ROOT="${AIOS_LEGACY_ROOT:-/etc/ai-lifeos/legacy}"
+SYSTEMD_UNIT_FILE="${AIOS_SYSTEMD_UNIT_FILE:-${SYSTEMD_ROOT}/ai-lifeos.service}"
+SYSTEMD_DROPIN_DIR="${AIOS_SYSTEMD_DROPIN_DIR:-${SYSTEMD_UNIT_FILE}.d}"
+SYSTEMD_DROPIN_FILE="${AIOS_SYSTEMD_DROPIN_FILE:-${SYSTEMD_DROPIN_DIR}/10-public-beta.conf}"
+LEGACY_UNIT_BACKUP="${AIOS_LEGACY_UNIT_BACKUP:-${LEGACY_ROOT}/ai-lifeos.service}"
+LEGACY_DROPIN_BACKUP="${AIOS_LEGACY_DROPIN_BACKUP:-${LEGACY_ROOT}/10-public-beta.conf}"
+LEGACY_RETIRED_DROPIN_ROOT="${AIOS_LEGACY_RETIRED_DROPIN_ROOT:-${LEGACY_ROOT}/retired}"
 INCOMING="${ROOT}/incoming"
 RELEASES="${ROOT}/releases"
 STATE="${ROOT}/state"
@@ -37,17 +43,23 @@ fail() {
   exit 1
 }
 
-[[ "${EUID}" -eq 0 ]] || fail "run as root"
-command -v flock >/dev/null || fail "flock is required"
-command -v sha256sum >/dev/null || fail "sha256sum is required"
-command -v systemd-run >/dev/null || fail "systemd-run is required"
-command -v curl >/dev/null || fail "curl is required"
-command -v runuser >/dev/null || fail "runuser is required"
-command -v ss >/dev/null || fail "ss is required"
-command -v stat >/dev/null || fail "stat is required"
-command -v install >/dev/null || fail "install is required"
-command -v cmp >/dev/null || fail "cmp is required"
-command -v grep >/dev/null || fail "grep is required"
+require_runtime_commands() {
+  [[ "${EUID}" -eq 0 ]] || fail "run as root"
+  command -v flock >/dev/null || fail "flock is required"
+  command -v sha256sum >/dev/null || fail "sha256sum is required"
+  command -v systemd-run >/dev/null || fail "systemd-run is required"
+  command -v systemctl >/dev/null || fail "systemctl is required"
+  command -v curl >/dev/null || fail "curl is required"
+  command -v runuser >/dev/null || fail "runuser is required"
+  command -v ss >/dev/null || fail "ss is required"
+  command -v stat >/dev/null || fail "stat is required"
+  command -v install >/dev/null || fail "install is required"
+  command -v cmp >/dev/null || fail "cmp is required"
+  command -v grep >/dev/null || fail "grep is required"
+  command -v find >/dev/null || fail "find is required"
+  command -v basename >/dev/null || fail "basename is required"
+  command -v dirname >/dev/null || fail "dirname is required"
+}
 
 wait_for_health() {
   local port="$1"
@@ -70,13 +82,171 @@ wait_for_health() {
 
 FIRST_MANAGED_RELEASE=0
 RESTORE_LEGACY_ON_FAILURE=0
+DROPIN_QUARANTINED=0
+DROPIN_QUARANTINE=""
 CANDIDATE_UNIT=""
 STAGING_RELEASE=""
 DEPLOY_SUCCEEDED=0
 
+assert_secure_root_directory() {
+  local directory="$1"
+  local label="$2"
+  local expected_mode="$3"
+  local owner
+  local mode
+  [[ -d "${directory}" && ! -L "${directory}" ]] \
+    || fail "${label} is missing or unsafe"
+  owner="$(stat -Lc '%u' "${directory}")"
+  mode="$(stat -Lc '%a' "${directory}")"
+  [[ "${owner}" == "0" ]] || fail "${label} must be owned by root"
+  [[ "${mode}" == "${expected_mode}" ]] \
+    || fail "${label} must use mode ${expected_mode}"
+}
+
+assert_secure_legacy_backup_file() {
+  local file="$1"
+  local label="$2"
+  local owner
+  local mode
+  [[ -f "${file}" && ! -L "${file}" ]] || fail "${label} is missing or unsafe"
+  owner="$(stat -Lc '%u' "${file}")"
+  mode="$(stat -Lc '%a' "${file}")"
+  [[ "${owner}" == "0" ]] || fail "${label} must be owned by root"
+  [[ "${mode}" == "600" ]] || fail "${label} must use mode 600"
+}
+
+assert_safe_live_dropin() {
+  local owner
+  local mode
+  [[ -d "${SYSTEMD_DROPIN_DIR}" && ! -L "${SYSTEMD_DROPIN_DIR}" ]] \
+    || fail "legacy systemd drop-in directory is missing or unsafe"
+  owner="$(stat -Lc '%u' "${SYSTEMD_DROPIN_DIR}")"
+  mode="$(stat -Lc '%a' "${SYSTEMD_DROPIN_DIR}")"
+  [[ "${owner}" == "0" ]] || fail "legacy systemd drop-in directory must be owned by root"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || fail "legacy systemd drop-in directory must not be writable by group or other"
+
+  [[ -f "${SYSTEMD_DROPIN_FILE}" && ! -L "${SYSTEMD_DROPIN_FILE}" ]] \
+    || fail "legacy systemd drop-in is missing or unsafe"
+  owner="$(stat -Lc '%u' "${SYSTEMD_DROPIN_FILE}")"
+  mode="$(stat -Lc '%a' "${SYSTEMD_DROPIN_FILE}")"
+  [[ "${owner}" == "0" ]] || fail "legacy systemd drop-in must be owned by root"
+  (( (8#${mode} & 8#022) == 0 )) \
+    || fail "legacy systemd drop-in must not be writable by group or other"
+}
+
+assert_reviewed_dropin_set() {
+  local -a entries=()
+  mapfile -t entries < <(
+    find "${SYSTEMD_DROPIN_DIR}" -mindepth 1 -maxdepth 1 -print
+  )
+  [[ "${#entries[@]}" -eq 1 && "${entries[0]}" == "${SYSTEMD_DROPIN_FILE}" ]] \
+    || fail "legacy migration requires a complete backup for every live systemd drop-in"
+}
+
+validate_legacy_migration_inputs() {
+  local backup_directory
+  if [[ "${AIOS_RELEASE_TEST_LIBRARY_ONLY:-0}" != "1" ]]; then
+    [[ "${SYSTEMD_ROOT}" == "/etc/systemd/system" ]] \
+      || fail "systemd root must remain /etc/systemd/system"
+    [[ "${LEGACY_ROOT}" == "/etc/ai-lifeos/legacy" ]] \
+      || fail "legacy backup root must remain /etc/ai-lifeos/legacy"
+  fi
+  [[ "${SYSTEMD_UNIT_FILE}" == "${SYSTEMD_ROOT}/"*.service ]] \
+    || fail "systemd unit file must be an absolute service path under /etc/systemd/system"
+  [[ "${SYSTEMD_DROPIN_DIR}" == "${SYSTEMD_UNIT_FILE}.d" ]] \
+    || fail "systemd drop-in directory must match the managed service unit"
+  [[ "${SYSTEMD_DROPIN_FILE}" == "${SYSTEMD_DROPIN_DIR}/"*.conf ]] \
+    || fail "systemd drop-in file must remain inside the managed service drop-in directory"
+  [[ "${LEGACY_UNIT_BACKUP}" == "${LEGACY_ROOT}/"*.service ]] \
+    || fail "legacy unit backup must remain under /etc/ai-lifeos/legacy"
+  [[ "${LEGACY_DROPIN_BACKUP}" == "${LEGACY_ROOT}/"*.conf ]] \
+    || fail "legacy drop-in backup must remain under /etc/ai-lifeos/legacy"
+  [[ "${LEGACY_RETIRED_DROPIN_ROOT}" == "${LEGACY_ROOT}/"* ]] \
+    || fail "retired legacy drop-ins must remain under /etc/ai-lifeos/legacy"
+
+  backup_directory="$(dirname "${LEGACY_UNIT_BACKUP}")"
+  [[ "${backup_directory}" == "$(dirname "${LEGACY_DROPIN_BACKUP}")" ]] \
+    || fail "legacy unit and drop-in backups must share one protected directory"
+  assert_secure_root_directory "${backup_directory}" "legacy backup directory" "700"
+  assert_secure_legacy_backup_file "${LEGACY_UNIT_BACKUP}" "legacy unit backup"
+  assert_secure_legacy_backup_file "${LEGACY_DROPIN_BACKUP}" "legacy drop-in backup"
+
+  [[ -f "${SYSTEMD_UNIT_FILE}" && ! -L "${SYSTEMD_UNIT_FILE}" ]] \
+    || fail "new systemd unit file is missing or unsafe"
+  [[ "$(stat -Lc '%u' "${SYSTEMD_UNIT_FILE}")" == "0" ]] \
+    || fail "new systemd unit file must be owned by root"
+  (( (8#$(stat -Lc '%a' "${SYSTEMD_UNIT_FILE}") & 8#022) == 0 )) \
+    || fail "new systemd unit file must not be writable by group or other"
+  cmp -s "${SYSTEMD_UNIT_FILE}" "${LEGACY_UNIT_BACKUP}" \
+    && fail "legacy unit backup must differ from the new managed unit"
+  grep -Eq '^\[Service\]$' "${LEGACY_UNIT_BACKUP}" \
+    || fail "legacy unit backup does not contain a Service section"
+  grep -Eq '^ExecStart=' "${LEGACY_UNIT_BACKUP}" \
+    || fail "legacy unit backup does not contain ExecStart"
+
+  assert_safe_live_dropin
+  assert_reviewed_dropin_set
+  [[ "$(basename "${LEGACY_DROPIN_BACKUP}")" == "$(basename "${SYSTEMD_DROPIN_FILE}")" ]] \
+    || fail "legacy drop-in backup filename does not match the live drop-in"
+  cmp -s "${SYSTEMD_DROPIN_FILE}" "${LEGACY_DROPIN_BACKUP}" \
+    || fail "legacy drop-in backup does not match the live drop-in"
+
+  grep -Fq 'WorkingDirectory=/srv/ai-lifeos/current' "${SYSTEMD_UNIT_FILE}" \
+    || fail "new systemd unit does not use the managed current release"
+  grep -Fq 'ExecStart=/opt/ai-lifeos/node/bin/node ' "${SYSTEMD_UNIT_FILE}" \
+    || fail "new systemd unit does not use the fixed Node.js runtime"
+}
+
+assert_loaded_legacy_dropin() {
+  [[ "$(systemctl show --property=DropInPaths --value "${SERVICE_NAME}")" == "${SYSTEMD_DROPIN_FILE}" ]] \
+    || fail "systemd did not load the reviewed legacy drop-in"
+}
+
+assert_no_loaded_dropins() {
+  [[ -z "$(systemctl show --property=DropInPaths --value "${SERVICE_NAME}")" ]] \
+    || fail "managed service still loads an unreviewed systemd drop-in"
+}
+
+retire_legacy_dropin() {
+  install -d -o root -g root -m 0700 "${LEGACY_RETIRED_DROPIN_ROOT}" \
+    || return 1
+  assert_secure_root_directory \
+    "${LEGACY_RETIRED_DROPIN_ROOT}" \
+    "retired legacy drop-in directory" \
+    "700" \
+    || return 1
+  DROPIN_QUARANTINE="${LEGACY_RETIRED_DROPIN_ROOT}/${RELEASE_ID}-$(basename "${SYSTEMD_DROPIN_DIR}")-$$"
+  [[ ! -e "${DROPIN_QUARANTINE}" ]] \
+    || {
+      printf 'retired legacy drop-in path already exists: %s\n' "${DROPIN_QUARANTINE}" >&2
+      return 1
+    }
+  mv -T -- "${SYSTEMD_DROPIN_DIR}" "${DROPIN_QUARANTINE}" || return 1
+  DROPIN_QUARANTINED=1
+  systemctl daemon-reload || return 1
+  assert_no_loaded_dropins
+}
+
 restore_legacy_service() {
   printf 'first migration failed; restoring the legacy systemd service\n' >&2
   rm -f "${ROOT}/current" "${ROOT}/previous" "${STATE}/current" "${STATE}/previous"
+  assert_secure_legacy_backup_file "${LEGACY_UNIT_BACKUP}" "legacy unit backup" \
+    || return 1
+  assert_secure_legacy_backup_file "${LEGACY_DROPIN_BACKUP}" "legacy drop-in backup" \
+    || return 1
+  if [[ "${DROPIN_QUARANTINED}" == "1" ]]; then
+    [[ -d "${DROPIN_QUARANTINE}" && ! -L "${DROPIN_QUARANTINE}" ]] \
+      || return 1
+    cmp -s "${DROPIN_QUARANTINE}/$(basename "${SYSTEMD_DROPIN_FILE}")" "${LEGACY_DROPIN_BACKUP}" \
+      || return 1
+    [[ ! -e "${SYSTEMD_DROPIN_DIR}" ]] || return 1
+    mv -T -- "${DROPIN_QUARANTINE}" "${SYSTEMD_DROPIN_DIR}" || return 1
+    DROPIN_QUARANTINED=0
+  else
+    assert_safe_live_dropin
+    cmp -s "${SYSTEMD_DROPIN_FILE}" "${LEGACY_DROPIN_BACKUP}" || return 1
+  fi
   install -o root -g root -m 0644 "${LEGACY_UNIT_BACKUP}" "${SYSTEMD_UNIT_FILE}" \
     || return 1
   systemctl daemon-reload || return 1
@@ -105,6 +275,12 @@ cleanup() {
   exit "${exit_code}"
 }
 
+if [[ "${BASH_SOURCE[0]}" != "$0" && "${AIOS_RELEASE_TEST_LIBRARY_ONLY:-0}" == "1" ]]; then
+  return 0
+fi
+
+require_runtime_commands
+
 exec 9>"/run/lock/ai-lifeos-release.lock"
 flock -n 9 || fail "another AI-LifeOS deployment or rollback is running"
 trap cleanup EXIT
@@ -123,26 +299,12 @@ fi
 if [[ "${LEGACY_MIGRATION}" == "1" ]]; then
   [[ "${FIRST_MANAGED_RELEASE}" == "1" ]] \
     || fail "legacy migration mode is only valid before the first managed release"
-  [[ "${SYSTEMD_UNIT_FILE}" == /etc/systemd/system/*.service ]] \
-    || fail "systemd unit file must be an absolute service path under /etc/systemd/system"
-  [[ "${LEGACY_UNIT_BACKUP}" == /etc/ai-lifeos/legacy/*.service ]] \
-    || fail "legacy unit backup must remain under /etc/ai-lifeos/legacy"
-  [[ -f "${SYSTEMD_UNIT_FILE}" && ! -L "${SYSTEMD_UNIT_FILE}" ]] \
-    || fail "new systemd unit file is missing or unsafe"
-  [[ -f "${LEGACY_UNIT_BACKUP}" && ! -L "${LEGACY_UNIT_BACKUP}" ]] \
-    || fail "legacy systemd unit backup is missing or unsafe"
-  cmp -s "${SYSTEMD_UNIT_FILE}" "${LEGACY_UNIT_BACKUP}" \
-    && fail "legacy unit backup must differ from the new managed unit"
+  validate_legacy_migration_inputs
   RESTORE_LEGACY_ON_FAILURE=1
-  grep -Fq 'WorkingDirectory=/srv/ai-lifeos/current' "${SYSTEMD_UNIT_FILE}" \
-    || fail "new systemd unit does not use the managed current release"
-  grep -Fq 'ExecStart=/opt/ai-lifeos/node/bin/node ' "${SYSTEMD_UNIT_FILE}" \
-    || fail "new systemd unit does not use the fixed Node.js runtime"
   systemctl daemon-reload
   [[ "$(systemctl show --property=FragmentPath --value "${SERVICE_NAME}")" == "${SYSTEMD_UNIT_FILE}" ]] \
     || fail "systemd did not load the reviewed unit file"
-  [[ -z "$(systemctl show --property=DropInPaths --value "${SERVICE_NAME}")" ]] \
-    || fail "legacy migration does not support unreviewed systemd drop-ins"
+  assert_loaded_legacy_dropin
   systemctl is-active --quiet "${SERVICE_NAME}" \
     || fail "legacy service is not active before migration"
   wait_for_health "${PUBLIC_PORT}" 1 \
@@ -298,6 +460,10 @@ fi
 
 ln -s "${FINAL_RELEASE}" "${ROOT}/current.next.$$"
 mv -Tf "${ROOT}/current.next.$$" "${ROOT}/current"
+if [[ "${LEGACY_MIGRATION}" == "1" ]]; then
+  retire_legacy_dropin \
+    || fail "could not safely retire the legacy systemd drop-in"
+fi
 systemctl restart "${SERVICE_NAME}"
 
 if ! wait_for_health "${PUBLIC_PORT}" 1; then
@@ -331,3 +497,6 @@ chmod 0640 "${ARTIFACTS}/${RELEASE_ID}.tar.gz" "${ARTIFACTS}/${RELEASE_ID}.json"
 DEPLOY_SUCCEEDED=1
 trap - EXIT
 printf 'deployed %s (%s); previous=%s\n' "${RELEASE_ID}" "${TAG}" "${OLD_CURRENT:-none}"
+if [[ "${LEGACY_MIGRATION}" == "1" ]]; then
+  printf 'retired legacy drop-in: %s\n' "${DROPIN_QUARANTINE}"
+fi

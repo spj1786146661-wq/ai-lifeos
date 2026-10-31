@@ -201,17 +201,24 @@ sudo visudo -cf /etc/sudoers
 
 ### 5. 更新 systemd unit
 
-第一次从现有 NVM 服务迁移前，先确认旧 unit 没有 drop-in，并备份当前
-实际 unit。备份必须在替换 unit 之前完成：
+第一次从现有 NVM 服务迁移前，先确认当前实际 unit 仍由
+`/etc/systemd/system/ai-lifeos.service` 加载。旧服务当前还使用一个已审查的
+drop-in：`/etc/systemd/system/ai-lifeos.service.d/10-public-beta.conf`。
+备份必须在替换 unit 之前完成，并保留原权限：
 
 ```bash
-test -z "$(systemctl show --property=DropInPaths --value ai-lifeos.service)"
 test "$(systemctl show --property=FragmentPath --value ai-lifeos.service)" \
   = "/etc/systemd/system/ai-lifeos.service"
-sudo install -d -o root -g root -m 0755 /etc/ai-lifeos/legacy
-sudo install -o root -g root -m 0644 \
+sudo install -d -o root -g root -m 0700 /etc/ai-lifeos/legacy
+sudo install -o root -g root -m 0600 \
   /etc/systemd/system/ai-lifeos.service \
   /etc/ai-lifeos/legacy/ai-lifeos.service
+sudo install -o root -g root -m 0600 \
+  /etc/systemd/system/ai-lifeos.service.d/10-public-beta.conf \
+  /etc/ai-lifeos/legacy/10-public-beta.conf
+sudo cmp -s \
+  /etc/systemd/system/ai-lifeos.service.d/10-public-beta.conf \
+  /etc/ai-lifeos/legacy/10-public-beta.conf
 ```
 
 然后以 `scripts/release/ai-lifeos.service.example` 为基线，把新 unit 安装到
@@ -230,17 +237,36 @@ ExecStart=/opt/ai-lifeos/node/bin/node /srv/ai-lifeos/current/node_modules/next/
 ```text
 AIOS_LEGACY_MIGRATION=1
 AIOS_SYSTEMD_UNIT_FILE=/etc/systemd/system/ai-lifeos.service
+AIOS_SYSTEMD_DROPIN_FILE=/etc/systemd/system/ai-lifeos.service.d/10-public-beta.conf
 AIOS_LEGACY_UNIT_BACKUP=/etc/ai-lifeos/legacy/ai-lifeos.service
+AIOS_LEGACY_DROPIN_BACKUP=/etc/ai-lifeos/legacy/10-public-beta.conf
+AIOS_LEGACY_RETIRED_DROPIN_ROOT=/etc/ai-lifeos/legacy/retired
 ```
 
 执行 `systemctl daemon-reload`，但不要提前重启服务。当前旧进程会继续运行。
-首次发布脚本会先确认旧服务仍在 `127.0.0.1:3000` 健康运行，再启动
-`3001` 候选版本。候选失败或新正式版本切换失败时，脚本会恢复旧 unit、
-重新加载 systemd 并重启原来的 NVM 服务。若旧 unit 备份缺失、与新 unit
-相同、存在未审查的 drop-in，或旧服务不健康，迁移会在切换前拒绝继续。
+首次发布脚本会在修改正式服务前检查：
 
-首次发布成功后，把 `AIOS_LEGACY_MIGRATION` 改回 `0`。保留旧 unit 备份，
-直到至少一个后续版本也完成发布和回滚演练。第一次成功迁移没有
+- 备份目录属于 root，权限为 `0700`；
+- unit 和 drop-in 备份均属于 root、权限为 `0600`、不是符号链接；
+- 备份与当前实际 unit/drop-in 一致，旧 unit 与新 managed unit 不同；
+- drop-in 目录和文件不被 group 或 other 写入；
+- drop-in 目录只含已备份的 `10-public-beta.conf`；
+- systemd 当前确实加载该 drop-in，且旧服务在 `127.0.0.1:3000` 健康。
+
+任一条件不满足，脚本会在替换正式 unit 或移动 drop-in 前停止。候选
+`3001` 健康检查失败时，旧 unit 和 live drop-in 尚未改动，脚本仍会校验
+并恢复旧 unit、执行 `daemon-reload`、重启旧服务并检查 `127.0.0.1:3000`。
+
+候选通过后，脚本在切换正式服务前把整个 drop-in 目录原子移动到
+`/etc/ai-lifeos/legacy/retired/` 下，再执行 `daemon-reload`，确认 managed
+服务不再加载旧 drop-in。新正式版本健康检查失败时，脚本先把隔离目录移回
+原位置，再恢复旧 unit、重新加载 systemd、重启旧服务并检查端口 `3000`。
+如果自动恢复失败，日志会输出
+`critical: automatic legacy service restoration failed`，发布以非零状态退出。
+
+首次发布成功后，把 `AIOS_LEGACY_MIGRATION` 改回 `0`。保留旧 unit、
+drop-in 备份及 `retired/` 中的隔离目录，不要覆盖或删除，直到至少一个
+后续版本也完成发布和回滚演练。第一次成功迁移没有
 `state/previous` 管理版本，因此普通回滚工作流不能把它自动回滚到 NVM
 旧版；旧版恢复保护专门覆盖首次迁移失败。
 
