@@ -1,6 +1,6 @@
 # AI-LifeOS GitHub 版本发布与自动部署
 
-更新日期：2026-10-30（Asia/Shanghai）
+更新日期：2026-10-31（Asia/Shanghai）
 
 ## 当前边界
 
@@ -31,6 +31,17 @@
 
 普通提交、普通标签推送和合并都不会自动更新线上。只有
 `Manual production release` 工作流可以被手动触发。
+
+服务器运行时固定使用 root 管理的 Node.js `v24.22.2`：
+
+```text
+/opt/ai-lifeos/node/bin/node
+/opt/ai-lifeos/node/lib/node_modules/npm/bin/npm-cli.js
+```
+
+`/opt/ai-lifeos/node` 是指向已校验版本目录的稳定符号链接。发布、候选
+启动和正式 systemd 服务均不依赖登录用户的 NVM、shell profile、
+`/usr/bin/node` 或 `/usr/bin/npm`。
 
 ## GitHub 工作流
 
@@ -121,7 +132,38 @@ sudo install -d -o root -g root -m 0755 /srv/ai-lifeos/state /srv/ai-lifeos/arti
 sudo install -d -o root -g root -m 0755 /etc/ai-lifeos
 ```
 
-### 2. 安装 root-owned 发布脚本
+### 2. 安装固定 Node.js 24 运行时
+
+先审查并安装 root-owned 安装器：
+
+```bash
+sudo install -o root -g root -m 0755 \
+  scripts/release/server/install-node-runtime.sh \
+  /usr/local/sbin/aios-install-node-runtime
+sudo /usr/local/sbin/aios-install-node-runtime
+```
+
+安装器只接受 Node.js `v24.22.2`，从 Node.js 官方 HTTPS 地址下载
+`node-v24.22.2-linux-x64.tar.xz`，并使用官方
+`SHASUMS256.txt` 中对应的 SHA-256
+`48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75`
+验证后，安装到 `/opt/ai-lifeos/node-v24.22.2-linux-x64`。稳定入口为
+`/opt/ai-lifeos/node`。目录和文件由 `root:root` 持有，group/other
+不可写，但 `aios` 服务用户可读取和执行。
+
+安装后验证：
+
+```bash
+/opt/ai-lifeos/node/bin/node --version
+/opt/ai-lifeos/node/bin/node \
+  /opt/ai-lifeos/node/lib/node_modules/npm/bin/npm-cli.js --version
+```
+
+不要把维护者 NVM 目录授权给 `deploy` 或 `aios`，也不要把 NVM 路径写入
+systemd。`deploy` 账号只需上传发布包并通过 sudo 执行两个固定的
+root-owned wrapper；它不需要直接修改 `/opt/ai-lifeos`。
+
+### 3. 安装 root-owned 发布脚本
 
 ```bash
 sudo install -o root -g root -m 0755 \
@@ -141,7 +183,7 @@ sudo visudo -cf /etc/sudoers
 
 安装 sudoers 文件前必须把示例中的 `deploy` 改成实际受限 SSH 账号。
 
-### 3. 迁移现有环境文件
+### 4. 迁移现有环境文件
 
 保持现有值原样，把服务器环境文件放在 Git 外：
 
@@ -157,22 +199,61 @@ sudo visudo -cf /etc/sudoers
 
 不要在本轮重新生成会话密钥、入口密钥或 TokenHub Key。
 
-### 4. 更新 systemd unit
+### 5. 更新 systemd unit
 
-以 `scripts/release/ai-lifeos.service.example` 为基线，把现有服务改成：
+第一次从现有 NVM 服务迁移前，先确认旧 unit 没有 drop-in，并备份当前
+实际 unit。备份必须在替换 unit 之前完成：
+
+```bash
+test -z "$(systemctl show --property=DropInPaths --value ai-lifeos.service)"
+test "$(systemctl show --property=FragmentPath --value ai-lifeos.service)" \
+  = "/etc/systemd/system/ai-lifeos.service"
+sudo install -d -o root -g root -m 0755 /etc/ai-lifeos/legacy
+sudo install -o root -g root -m 0644 \
+  /etc/systemd/system/ai-lifeos.service \
+  /etc/ai-lifeos/legacy/ai-lifeos.service
+```
+
+然后以 `scripts/release/ai-lifeos.service.example` 为基线，把新 unit 安装到
+原路径：
 
 ```ini
 WorkingDirectory=/srv/ai-lifeos/current
 EnvironmentFile=/srv/ai-lifeos/shared/public-beta.env
 EnvironmentFile=/srv/ai-lifeos/current/release.env
-ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3000
+Environment=PATH=/opt/ai-lifeos/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/ai-lifeos/node/bin/node /srv/ai-lifeos/current/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
 ```
+
+在 `/etc/ai-lifeos/deploy.conf` 中为第一次迁移临时设置：
+
+```text
+AIOS_LEGACY_MIGRATION=1
+AIOS_SYSTEMD_UNIT_FILE=/etc/systemd/system/ai-lifeos.service
+AIOS_LEGACY_UNIT_BACKUP=/etc/ai-lifeos/legacy/ai-lifeos.service
+```
+
+执行 `systemctl daemon-reload`，但不要提前重启服务。当前旧进程会继续运行。
+首次发布脚本会先确认旧服务仍在 `127.0.0.1:3000` 健康运行，再启动
+`3001` 候选版本。候选失败或新正式版本切换失败时，脚本会恢复旧 unit、
+重新加载 systemd 并重启原来的 NVM 服务。若旧 unit 备份缺失、与新 unit
+相同、存在未审查的 drop-in，或旧服务不健康，迁移会在切换前拒绝继续。
+
+首次发布成功后，把 `AIOS_LEGACY_MIGRATION` 改回 `0`。保留旧 unit 备份，
+直到至少一个后续版本也完成发布和回滚演练。第一次成功迁移没有
+`state/previous` 管理版本，因此普通回滚工作流不能把它自动回滚到 NVM
+旧版；旧版恢复保护专门覆盖首次迁移失败。
 
 现有服务名若不是 `ai-lifeos.service`，在
 `/etc/ai-lifeos/deploy.conf` 中填写实际名称。发布脚本只重启该服务，
 不触碰 Nginx、Tailscale Funnel 或 Xray。
 
-### 5. 配置 SSH 部署密钥
+正式端口保持 `3000`，候选版本使用 `3001`。发布前脚本会先检查候选
+端口未被占用，在候选实例通过本机健康检查后才切换 `current`。原有
+Nginx、Tailscale Funnel 与 Xray 继续指向正式服务，不需要改为候选
+端口。
+
+### 6. 配置 SSH 部署密钥
 
 为 `deploy` 账号建立专用 SSH key，只允许其：
 
@@ -198,7 +279,7 @@ DEPLOY_KNOWN_HOSTS
 Repository variables：
 
 ```text
-PUBLIC_BETA_HOST=<公开 HTTPS 主机名>
+PUBLIC_BETA_HOST=<公开 HTTPS 主机名，可带端口，例如 beta.example.com:8443>
 DEPLOY_HOST=<SSH 主机名或地址>
 DEPLOY_USER=deploy
 DEPLOY_PORT=22
@@ -207,6 +288,19 @@ DEPLOY_PATH=/srv/ai-lifeos
 
 `DEPLOY_KNOWN_HOSTS` 必须来自服务器 SSH host key 的已验证指纹。工作流
 使用 `StrictHostKeyChecking=yes`，不提供跳过主机校验的选项。
+
+工作流会把 `PUBLIC_BETA_HOST` 解析为两个不同值：
+
+```text
+构建和应用 Host 白名单：beta.example.com
+公网健康检查 Origin：https://beta.example.com:8443
+```
+
+因此 `:8443` 会保留在公网 `/` 和 `/source` 验证中，但不会进入
+`AIOS_PUBLIC_BETA_HOSTS`。服务器的
+`/srv/ai-lifeos/shared/public-beta.env` 同样应把
+`AIOS_PUBLIC_BETA_HOSTS` 配置成不带端口的主机名。该拆分不改变
+Next.js 的 `127.0.0.1:3000` 监听地址。
 
 ## 首次发布流程
 
@@ -245,8 +339,10 @@ DEPLOY_PATH=/srv/ai-lifeos
 node --test tests/release-automation.test.mjs
 bash -n scripts/release/server/deploy-release.sh
 bash -n scripts/release/server/rollback-release.sh
+bash -n scripts/release/server/install-node-runtime.sh
 node --check scripts/release/check-release-source.mjs
 node --check scripts/release/package-release.mjs
+node --check scripts/release/public-beta-authority.mjs
 ```
 
 工作流会在 GitHub Ubuntu runner 上重复这些检查，并在独立环境中执行

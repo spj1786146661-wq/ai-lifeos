@@ -9,9 +9,10 @@ User=aios
 Group=aios
 WorkingDirectory=/srv/ai-lifeos/current
 Environment=NODE_ENV=production
+Environment=PATH=/opt/ai-lifeos/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/srv/ai-lifeos/shared/public-beta.env
 EnvironmentFile=/srv/ai-lifeos/current/release.env
-ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3000
+ExecStart=/opt/ai-lifeos/node/bin/node /srv/ai-lifeos/current/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20

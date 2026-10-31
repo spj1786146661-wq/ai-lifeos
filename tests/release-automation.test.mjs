@@ -10,6 +10,7 @@ import {
   validateReleaseTag,
   validateSourceUrl,
 } from '../scripts/release/check-release-source.mjs'
+import { parsePublicBetaAuthority } from '../scripts/release/public-beta-authority.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const releaseWorkflow = fs.readFileSync(
@@ -22,8 +23,21 @@ const rollbackWorkflow = fs.readFileSync(
 )
 const deployScriptPath = path.join(root, 'scripts/release/server/deploy-release.sh')
 const rollbackScriptPath = path.join(root, 'scripts/release/server/rollback-release.sh')
+const installNodeScriptPath = path.join(
+  root,
+  'scripts/release/server/install-node-runtime.sh',
+)
 const deployScript = fs.readFileSync(deployScriptPath, 'utf8')
 const rollbackScript = fs.readFileSync(rollbackScriptPath, 'utf8')
+const installNodeScript = fs.readFileSync(installNodeScriptPath, 'utf8')
+const deployConfig = fs.readFileSync(
+  path.join(root, 'scripts/release/deploy.conf.example'),
+  'utf8',
+)
+const serviceUnit = fs.readFileSync(
+  path.join(root, 'scripts/release/ai-lifeos.service.example'),
+  'utf8',
+)
 
 test('release workflow is manual-only and protected by production approval', () => {
   assert.match(releaseWorkflow, /^on:\s*\n\s+workflow_dispatch:/m)
@@ -66,6 +80,114 @@ test('server scripts use lock, checksum, health checks, and automatic rollback',
   assert.match(rollbackScript, /flock -n 9/)
   assert.match(rollbackScript, /previous\.rollback/)
   assert.match(rollbackScript, /original release was restored/)
+})
+
+test('first migration fails closed and restores the legacy systemd unit', () => {
+  assert.match(deployConfig, /AIOS_LEGACY_MIGRATION=0/)
+  assert.match(
+    deployConfig,
+    /AIOS_SYSTEMD_UNIT_FILE=\/etc\/systemd\/system\/ai-lifeos\.service/,
+  )
+  assert.match(
+    deployConfig,
+    /AIOS_LEGACY_UNIT_BACKUP=\/etc\/ai-lifeos\/legacy\/ai-lifeos\.service/,
+  )
+  assert.match(deployScript, /an active unmanaged service exists/)
+  assert.match(deployScript, /legacy unit backup must differ from the new managed unit/)
+  assert.match(deployScript, /legacy migration does not support unreviewed systemd drop-ins/)
+  assert.match(deployScript, /RESTORE_LEGACY_ON_FAILURE=1/)
+  assert.match(deployScript, /restore_legacy_service/)
+  assert.match(deployScript, /install -o root -g root -m 0644/)
+  assert.match(deployScript, /systemctl daemon-reload/)
+  assert.match(deployScript, /legacy service restored after failed first migration/)
+  assert.match(deployScript, /DEPLOY_SUCCEEDED=1/)
+})
+
+test('release runtime is fixed, root-managed, and independent of NVM and /usr/bin npm', () => {
+  assert.match(deployConfig, /AIOS_NODE_VERSION=v24\.22\.2/)
+  assert.match(deployConfig, /AIOS_NODE_ROOT=\/opt\/ai-lifeos\/node/)
+  assert.match(deployConfig, /AIOS_NODE_BIN=\/opt\/ai-lifeos\/node\/bin\/node/)
+  assert.match(
+    deployConfig,
+    /AIOS_NPM_CLI=\/opt\/ai-lifeos\/node\/lib\/node_modules\/npm\/bin\/npm-cli\.js/,
+  )
+  assert.match(deployScript, /Node\.js \$\{NODE_VERSION\} is required/)
+  assert.match(deployScript, /Node\.js runtime version must remain v24\.22\.2/)
+  assert.match(deployScript, /runtime path must be owned by root/)
+  assert.match(deployScript, /runtime path must not be writable by group or other/)
+  assert.match(deployScript, /service user \$\{SERVICE_USER\} cannot execute/)
+  assert.match(deployScript, /service user \$\{SERVICE_USER\} cannot read/)
+  assert.match(deployScript, /"\$\{NODE_BIN\}" "\$\{NPM_CLI\}" --prefix/)
+  assert.match(deployScript, /"\$\{NODE_BIN\}" "\$\{NEXT_CLI\}" start/)
+  assert.doesNotMatch(deployScript, /command -v (?:node|npm)/)
+  assert.doesNotMatch(deployScript, /\/usr\/bin\/npm/)
+  assert.doesNotMatch(deployScript, /^\s*(?:node|npm)\b/m)
+  assert.match(
+    serviceUnit,
+    /ExecStart=\/opt\/ai-lifeos\/node\/bin\/node \/srv\/ai-lifeos\/current\/node_modules\/next\/dist\/bin\/next start --hostname 127\.0\.0\.1 --port 3000/,
+  )
+  assert.doesNotMatch(serviceUnit, /\/usr\/bin\/(?:node|npm)/)
+})
+
+test('pinned Node.js installer verifies the official archive and publishes a stable path', () => {
+  assert.match(installNodeScript, /NODE_VERSION="v24\.22\.2"/)
+  assert.doesNotMatch(installNodeScript, /AIOS_NODE_ARCHIVE_SHA256/)
+  assert.match(
+    installNodeScript,
+    /48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75/,
+  )
+  assert.match(installNodeScript, /https:\/\/nodejs\.org\/dist\/\$\{NODE_VERSION\}/)
+  assert.match(installNodeScript, /sha256sum --check --status/)
+  assert.match(installNodeScript, /chown -R root:root/)
+  assert.match(installNodeScript, /chmod -R go-w/)
+  assert.match(installNodeScript, /ACTIVE_ROOT="\$\{INSTALL_ROOT\}\/node"/)
+})
+
+test('public beta authority separates build hostname from HTTPS health origin', () => {
+  assert.deepEqual(parsePublicBetaAuthority('beta.example.com:8443'), {
+    hostname: 'beta.example.com',
+    origin: 'https://beta.example.com:8443',
+  })
+  assert.deepEqual(parsePublicBetaAuthority('BETA.EXAMPLE.COM'), {
+    hostname: 'beta.example.com',
+    origin: 'https://beta.example.com',
+  })
+  for (const invalid of [
+    '',
+    'https://beta.example.com:8443',
+    'beta.example.com/path',
+    '*.example.com',
+    'localhost:8443',
+    'beta.example.com:0',
+    'beta.example.com:65536',
+  ]) {
+    assert.throws(() => parsePublicBetaAuthority(invalid), invalid)
+  }
+})
+
+test('release workflow builds with a hostname and verifies the exact port-bearing origin', () => {
+  assert.match(releaseWorkflow, /NODE_VERSION: "24\.22\.2"/)
+  assert.match(
+    releaseWorkflow,
+    /node scripts\/release\/public-beta-authority\.mjs[\s\S]*--github-output >> "\$GITHUB_OUTPUT"/,
+  )
+  assert.match(
+    releaseWorkflow,
+    /AIOS_PUBLIC_BETA_HOSTS: \$\{\{ steps\.public\.outputs\.hostname \}\}/,
+  )
+  assert.match(
+    releaseWorkflow,
+    /public_origin: \$\{\{ steps\.public\.outputs\.origin \}\}/,
+  )
+  assert.match(
+    releaseWorkflow,
+    /PUBLIC_BETA_ORIGIN: \$\{\{ needs\.build\.outputs\.public_origin \}\}/,
+  )
+  assert.match(releaseWorkflow, /"\$\{PUBLIC_BETA_ORIGIN\}\/source"/)
+  assert.doesNotMatch(
+    releaseWorkflow,
+    /AIOS_PUBLIC_BETA_HOSTS: \$\{\{ vars\.PUBLIC_BETA_HOST \}\}/,
+  )
 })
 
 test('deployment scripts cannot manage proxy, tunnel, or Xray services', () => {
@@ -154,7 +276,7 @@ test('shell scripts parse with bash when available', t => {
     t.skip('bash is not installed in this environment')
     return
   }
-  for (const scriptPath of [deployScriptPath, rollbackScriptPath]) {
+  for (const scriptPath of [deployScriptPath, rollbackScriptPath, installNodeScriptPath]) {
     const result = spawnSync('bash', ['-n', scriptPath], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
   }

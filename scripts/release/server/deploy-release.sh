@@ -18,6 +18,13 @@ SHARED_ENV_FILE="${AIOS_SHARED_ENV_FILE:-${ROOT}/shared/public-beta.env}"
 PUBLIC_PORT="${AIOS_PUBLIC_PORT:-3000}"
 CANDIDATE_PORT="${AIOS_CANDIDATE_PORT:-3001}"
 HEALTH_PATH="${AIOS_HEALTH_PATH:-/}"
+NODE_VERSION="${AIOS_NODE_VERSION:-v24.22.2}"
+NODE_ROOT="${AIOS_NODE_ROOT:-/opt/ai-lifeos/node}"
+NODE_BIN="${AIOS_NODE_BIN:-${NODE_ROOT}/bin/node}"
+NPM_CLI="${AIOS_NPM_CLI:-${NODE_ROOT}/lib/node_modules/npm/bin/npm-cli.js}"
+LEGACY_MIGRATION="${AIOS_LEGACY_MIGRATION:-0}"
+SYSTEMD_UNIT_FILE="${AIOS_SYSTEMD_UNIT_FILE:-/etc/systemd/system/ai-lifeos.service}"
+LEGACY_UNIT_BACKUP="${AIOS_LEGACY_UNIT_BACKUP:-/etc/ai-lifeos/legacy/ai-lifeos.service}"
 INCOMING="${ROOT}/incoming"
 RELEASES="${ROOT}/releases"
 STATE="${ROOT}/state"
@@ -32,16 +39,138 @@ fail() {
 
 [[ "${EUID}" -eq 0 ]] || fail "run as root"
 command -v flock >/dev/null || fail "flock is required"
-command -v node >/dev/null || fail "node is required"
-command -v npm >/dev/null || fail "npm is required"
 command -v sha256sum >/dev/null || fail "sha256sum is required"
 command -v systemd-run >/dev/null || fail "systemd-run is required"
 command -v curl >/dev/null || fail "curl is required"
 command -v runuser >/dev/null || fail "runuser is required"
 command -v ss >/dev/null || fail "ss is required"
+command -v stat >/dev/null || fail "stat is required"
+command -v install >/dev/null || fail "install is required"
+command -v cmp >/dev/null || fail "cmp is required"
+command -v grep >/dev/null || fail "grep is required"
+
+wait_for_health() {
+  local port="$1"
+  local require_service="${2:-0}"
+  local attempts=30
+  local index
+  for ((index = 1; index <= attempts; index += 1)); do
+    if [[ "${require_service}" == "1" ]] && ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+      sleep 1
+      continue
+    fi
+    if curl --fail --silent --show-error --max-time 5 \
+      "http://127.0.0.1:${port}${HEALTH_PATH}" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+FIRST_MANAGED_RELEASE=0
+RESTORE_LEGACY_ON_FAILURE=0
+CANDIDATE_UNIT=""
+STAGING_RELEASE=""
+DEPLOY_SUCCEEDED=0
+
+restore_legacy_service() {
+  printf 'first migration failed; restoring the legacy systemd service\n' >&2
+  rm -f "${ROOT}/current" "${ROOT}/previous" "${STATE}/current" "${STATE}/previous"
+  install -o root -g root -m 0644 "${LEGACY_UNIT_BACKUP}" "${SYSTEMD_UNIT_FILE}" \
+    || return 1
+  systemctl daemon-reload || return 1
+  systemctl restart "${SERVICE_NAME}" || return 1
+  wait_for_health "${PUBLIC_PORT}" 1
+}
+
+cleanup() {
+  local exit_code=$?
+  trap - EXIT
+  set +e
+  if [[ -n "${CANDIDATE_UNIT}" ]]; then
+    systemctl stop "${CANDIDATE_UNIT}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${CANDIDATE_UNIT}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${STAGING_RELEASE}" ]]; then
+    rm -rf "${STAGING_RELEASE}"
+  fi
+  if [[ "${RESTORE_LEGACY_ON_FAILURE}" == "1" && "${DEPLOY_SUCCEEDED}" != "1" ]]; then
+    if restore_legacy_service; then
+      printf 'legacy service restored after failed first migration\n' >&2
+    else
+      printf 'critical: automatic legacy service restoration failed\n' >&2
+    fi
+  fi
+  exit "${exit_code}"
+}
 
 exec 9>"/run/lock/ai-lifeos-release.lock"
 flock -n 9 || fail "another AI-LifeOS deployment or rollback is running"
+trap cleanup EXIT
+
+if [[ ! -L "${ROOT}/current" ]]; then
+  FIRST_MANAGED_RELEASE=1
+fi
+if [[ "${LEGACY_MIGRATION}" != "0" && "${LEGACY_MIGRATION}" != "1" ]]; then
+  fail "AIOS_LEGACY_MIGRATION must be 0 or 1"
+fi
+if [[ "${FIRST_MANAGED_RELEASE}" == "1" ]] \
+  && systemctl is-active --quiet "${SERVICE_NAME}" \
+  && [[ "${LEGACY_MIGRATION}" != "1" ]]; then
+  fail "an active unmanaged service exists; create the legacy unit backup and set AIOS_LEGACY_MIGRATION=1"
+fi
+if [[ "${LEGACY_MIGRATION}" == "1" ]]; then
+  [[ "${FIRST_MANAGED_RELEASE}" == "1" ]] \
+    || fail "legacy migration mode is only valid before the first managed release"
+  [[ "${SYSTEMD_UNIT_FILE}" == /etc/systemd/system/*.service ]] \
+    || fail "systemd unit file must be an absolute service path under /etc/systemd/system"
+  [[ "${LEGACY_UNIT_BACKUP}" == /etc/ai-lifeos/legacy/*.service ]] \
+    || fail "legacy unit backup must remain under /etc/ai-lifeos/legacy"
+  [[ -f "${SYSTEMD_UNIT_FILE}" && ! -L "${SYSTEMD_UNIT_FILE}" ]] \
+    || fail "new systemd unit file is missing or unsafe"
+  [[ -f "${LEGACY_UNIT_BACKUP}" && ! -L "${LEGACY_UNIT_BACKUP}" ]] \
+    || fail "legacy systemd unit backup is missing or unsafe"
+  cmp -s "${SYSTEMD_UNIT_FILE}" "${LEGACY_UNIT_BACKUP}" \
+    && fail "legacy unit backup must differ from the new managed unit"
+  RESTORE_LEGACY_ON_FAILURE=1
+  grep -Fq 'WorkingDirectory=/srv/ai-lifeos/current' "${SYSTEMD_UNIT_FILE}" \
+    || fail "new systemd unit does not use the managed current release"
+  grep -Fq 'ExecStart=/opt/ai-lifeos/node/bin/node ' "${SYSTEMD_UNIT_FILE}" \
+    || fail "new systemd unit does not use the fixed Node.js runtime"
+  systemctl daemon-reload
+  [[ "$(systemctl show --property=FragmentPath --value "${SERVICE_NAME}")" == "${SYSTEMD_UNIT_FILE}" ]] \
+    || fail "systemd did not load the reviewed unit file"
+  [[ -z "$(systemctl show --property=DropInPaths --value "${SERVICE_NAME}")" ]] \
+    || fail "legacy migration does not support unreviewed systemd drop-ins"
+  systemctl is-active --quiet "${SERVICE_NAME}" \
+    || fail "legacy service is not active before migration"
+  wait_for_health "${PUBLIC_PORT}" 1 \
+    || fail "legacy service is not healthy before migration"
+fi
+
+[[ "${NODE_ROOT}" == "/opt/ai-lifeos/node" ]] \
+  || fail "Node.js runtime root must remain /opt/ai-lifeos/node"
+[[ "${NODE_VERSION}" == "v24.22.2" ]] \
+  || fail "Node.js runtime version must remain v24.22.2"
+[[ "${NODE_BIN}" == "${NODE_ROOT}/bin/node" ]] || fail "unexpected Node.js executable path"
+[[ "${NPM_CLI}" == "${NODE_ROOT}/lib/node_modules/npm/bin/npm-cli.js" ]] \
+  || fail "unexpected npm CLI path"
+[[ -x "${NODE_BIN}" ]] || fail "Node.js executable is missing: ${NODE_BIN}"
+[[ -r "${NPM_CLI}" ]] || fail "npm CLI is missing: ${NPM_CLI}"
+
+for runtime_path in "$(dirname "${NODE_ROOT}")" "${NODE_ROOT}" "${NODE_BIN}" "${NPM_CLI}"; do
+  runtime_owner="$(stat -Lc '%u' "${runtime_path}")"
+  runtime_mode="$(stat -Lc '%a' "${runtime_path}")"
+  [[ "${runtime_owner}" == "0" ]] || fail "runtime path must be owned by root: ${runtime_path}"
+  (( (8#${runtime_mode} & 8#022) == 0 )) \
+    || fail "runtime path must not be writable by group or other: ${runtime_path}"
+done
+[[ "$("${NODE_BIN}" --version)" == "${NODE_VERSION}" ]] \
+  || fail "Node.js ${NODE_VERSION} is required at ${NODE_BIN}"
+"${NODE_BIN}" "${NPM_CLI}" --version >/dev/null \
+  || fail "npm CLI could not be executed with the fixed Node.js runtime"
+NODE_PATH="${NODE_ROOT}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [[ -f "${ARCHIVE}" ]] || fail "missing ${ARCHIVE}"
 [[ -f "${MANIFEST}" ]] || fail "missing ${MANIFEST}"
@@ -49,9 +178,13 @@ flock -n 9 || fail "another AI-LifeOS deployment or rollback is running"
 id "${SERVICE_USER}" >/dev/null 2>&1 || fail "service user ${SERVICE_USER} does not exist"
 id "${DEPLOY_USER}" >/dev/null 2>&1 || fail "deployment user ${DEPLOY_USER} does not exist"
 getent group "${DEPLOY_GROUP}" >/dev/null || fail "deployment group ${DEPLOY_GROUP} does not exist"
+runuser -u "${SERVICE_USER}" -- "${NODE_BIN}" --version >/dev/null \
+  || fail "service user ${SERVICE_USER} cannot execute the fixed Node.js runtime"
+runuser -u "${SERVICE_USER}" -- test -r "${NPM_CLI}" \
+  || fail "service user ${SERVICE_USER} cannot read the fixed npm CLI"
 
 readarray -t manifest_values < <(
-  node - "${MANIFEST}" <<'NODE'
+  "${NODE_BIN}" - "${MANIFEST}" <<'NODE'
 const fs = require('node:fs')
 const path = process.argv[2]
 const value = JSON.parse(fs.readFileSync(path, 'utf8'))
@@ -96,12 +229,6 @@ rm -rf "${STAGING_RELEASE}"
 mkdir -p "${STAGING_RELEASE}"
 
 CANDIDATE_UNIT="aios-candidate-${RELEASE_ID//[^A-Za-z0-9]/_}.service"
-cleanup() {
-  systemctl stop "${CANDIDATE_UNIT}" >/dev/null 2>&1 || true
-  systemctl reset-failed "${CANDIDATE_UNIT}" >/dev/null 2>&1 || true
-  rm -rf "${STAGING_RELEASE}"
-}
-trap cleanup EXIT
 
 tar -xzf "${ARCHIVE}" -C "${STAGING_RELEASE}" --no-same-owner
 [[ -d "${STAGING_RELEASE}/release" ]] || fail "archive does not contain release/"
@@ -121,7 +248,8 @@ chmod 0440 "${APP_STAGING}/release.env"
 chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APP_STAGING}"
 
 runuser -u "${SERVICE_USER}" -- env HOME="${SERVICE_HOME}" \
-  npm --prefix "${APP_STAGING}" ci \
+  PATH="${NODE_PATH}" \
+  "${NODE_BIN}" "${NPM_CLI}" --prefix "${APP_STAGING}" ci \
   --omit=dev --no-audit --no-fund
 
 chmod -R u=rwX,g=rX,o= "${APP_STAGING}"
@@ -129,23 +257,12 @@ chmod -R u=rwX,g=rX,o= "${APP_STAGING}"
 mv "${APP_STAGING}" "${FINAL_RELEASE}"
 rmdir "${STAGING_RELEASE}"
 
-wait_for_health() {
-  local port="$1"
-  local attempts=30
-  local index
-  for ((index = 1; index <= attempts; index += 1)); do
-    if curl --fail --silent --show-error --max-time 5 \
-      "http://127.0.0.1:${port}${HEALTH_PATH}" >/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
 if ss -H -ltn "sport = :${CANDIDATE_PORT}" | grep -q .; then
   fail "candidate port ${CANDIDATE_PORT} is already in use"
 fi
+
+NEXT_CLI="${FINAL_RELEASE}/node_modules/next/dist/bin/next"
+[[ -r "${NEXT_CLI}" ]] || fail "candidate release is missing the Next.js CLI"
 
 systemd-run \
   --unit="${CANDIDATE_UNIT}" \
@@ -160,7 +277,9 @@ systemd-run \
   --property=PrivateTmp=yes \
   --setenv=NODE_ENV=production \
   --setenv=PORT="${CANDIDATE_PORT}" \
-  /usr/bin/npm run start -- --hostname 127.0.0.1 --port "${CANDIDATE_PORT}"
+  --setenv="PATH=${NODE_PATH}" \
+  "${NODE_BIN}" "${NEXT_CLI}" start \
+  --hostname 127.0.0.1 --port "${CANDIDATE_PORT}"
 
 wait_for_health "${CANDIDATE_PORT}" || fail "candidate release failed its health check"
 systemctl is-active --quiet "${CANDIDATE_UNIT}" \
@@ -181,14 +300,14 @@ ln -s "${FINAL_RELEASE}" "${ROOT}/current.next.$$"
 mv -Tf "${ROOT}/current.next.$$" "${ROOT}/current"
 systemctl restart "${SERVICE_NAME}"
 
-if ! wait_for_health "${PUBLIC_PORT}"; then
+if ! wait_for_health "${PUBLIC_PORT}" 1; then
   if [[ -n "${OLD_CURRENT}" && -d "${RELEASES}/${OLD_CURRENT}" ]]; then
     ln -s "${RELEASES}/${OLD_CURRENT}" "${ROOT}/current.rollback.$$"
     mv -Tf "${ROOT}/current.rollback.$$" "${ROOT}/current"
     printf '%s\n' "${OLD_CURRENT}" > "${STATE}/current"
     printf '%s\n' "${OLD_PREVIOUS}" > "${STATE}/previous"
     systemctl restart "${SERVICE_NAME}"
-    wait_for_health "${PUBLIC_PORT}" || true
+    wait_for_health "${PUBLIC_PORT}" 1 || true
   else
     rm -f "${ROOT}/current"
   fi
@@ -209,5 +328,6 @@ mv "${ARCHIVE}" "${ARTIFACTS}/${RELEASE_ID}.tar.gz"
 mv "${MANIFEST}" "${ARTIFACTS}/${RELEASE_ID}.json"
 chmod 0640 "${ARTIFACTS}/${RELEASE_ID}.tar.gz" "${ARTIFACTS}/${RELEASE_ID}.json"
 
+DEPLOY_SUCCEEDED=1
 trap - EXIT
 printf 'deployed %s (%s); previous=%s\n' "${RELEASE_ID}" "${TAG}" "${OLD_CURRENT:-none}"

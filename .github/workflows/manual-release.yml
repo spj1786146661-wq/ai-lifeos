@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: "24.22.0"
+  NODE_VERSION: "24.22.2"
   NEXT_TELEMETRY_DISABLED: "1"
 
 jobs:
@@ -32,6 +32,7 @@ jobs:
       release_id: ${{ steps.release.outputs.release_id }}
       source_url: ${{ steps.release.outputs.source_url }}
       archive_sha256: ${{ steps.package.outputs.archive_sha256 }}
+      public_origin: ${{ steps.public.outputs.origin }}
     steps:
       - name: Check confirmation phrase
         env:
@@ -96,6 +97,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: Resolve public beta hostname and health origin
+        id: public
+        env:
+          PUBLIC_BETA_HOST: ${{ vars.PUBLIC_BETA_HOST }}
+        run: |
+          set -euo pipefail
+          node scripts/release/public-beta-authority.mjs \
+            --authority "${PUBLIC_BETA_HOST}" \
+            --github-output >> "$GITHUB_OUTPUT"
+
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
 
@@ -110,12 +121,15 @@ jobs:
           set -euo pipefail
           bash -n scripts/release/server/deploy-release.sh
           bash -n scripts/release/server/rollback-release.sh
+          bash -n scripts/release/server/install-node-runtime.sh
           node --check scripts/release/check-release-source.mjs
           node --check scripts/release/package-release.mjs
+          node --check scripts/release/public-beta-authority.mjs
+          node --test --test-concurrency=1 tests/release-automation.test.mjs
 
       - name: Build production output
         env:
-          AIOS_PUBLIC_BETA_HOSTS: ${{ vars.PUBLIC_BETA_HOST }}
+          AIOS_PUBLIC_BETA_HOSTS: ${{ steps.public.outputs.hostname }}
           AIOS_PUBLIC_BETA_RELEASE_ID: ${{ steps.release.outputs.release_id }}
           AIOS_PUBLIC_BETA_SOURCE_URL: ${{ steps.release.outputs.source_url }}
         run: |
@@ -226,14 +240,14 @@ jobs:
 
       - name: Verify public release and source notice
         env:
-          PUBLIC_BETA_HOST: ${{ vars.PUBLIC_BETA_HOST }}
+          PUBLIC_BETA_ORIGIN: ${{ needs.build.outputs.public_origin }}
           RELEASE_ID: ${{ needs.build.outputs.release_id }}
           SOURCE_URL: ${{ needs.build.outputs.source_url }}
         run: |
           set -euo pipefail
-          [[ -n "${PUBLIC_BETA_HOST}" ]] || { echo "::error::PUBLIC_BETA_HOST is required."; exit 1; }
+          [[ -n "${PUBLIC_BETA_ORIGIN}" ]] || { echo "::error::PUBLIC_BETA_ORIGIN is required."; exit 1; }
           curl --fail --silent --show-error --retry 5 --retry-all-errors \
-            "https://${PUBLIC_BETA_HOST}/" >/dev/null
-          source_body="$(curl --fail --silent --show-error "https://${PUBLIC_BETA_HOST}/source")"
+            "${PUBLIC_BETA_ORIGIN}/" >/dev/null
+          source_body="$(curl --fail --silent --show-error "${PUBLIC_BETA_ORIGIN}/source")"
           grep -F -- "${RELEASE_ID}" <<< "${source_body}" >/dev/null
           grep -F -- "${SOURCE_URL}" <<< "${source_body}" >/dev/null

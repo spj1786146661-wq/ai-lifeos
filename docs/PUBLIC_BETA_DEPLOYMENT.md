@@ -1,6 +1,6 @@
 # AI-LifeOS Web Public Beta 单实例部署说明
 
-更新日期：2026-10-28
+更新日期：2026-10-31
 
 ## 适用架构
 
@@ -88,17 +88,38 @@ server {
 
 ## 构建与启动
 
-1. 使用 Node.js 20 或更高版本，执行锁文件安装。
+1. 使用 `scripts/release/server/install-node-runtime.sh` 安装并校验
+   root-owned Node.js `v24.22.2`。固定入口为
+   `/opt/ai-lifeos/node/bin/node`，不依赖 NVM 或 `/usr/bin/node`。
 2. 根据 `.env.public-beta.example` 创建仓库外的服务器环境文件。
 3. 确认 `AIOS_PUBLIC_BETA_RELEASE_ID` 与源码地址完全对应。
 4. 执行 `npm run build`。
 5. 只启动一个进程：
 
-```powershell
-npm run start -- --hostname 127.0.0.1 --port 3000
+```bash
+/opt/ai-lifeos/node/bin/node \
+  /srv/ai-lifeos/current/node_modules/next/dist/bin/next \
+  start --hostname 127.0.0.1 --port 3000
 ```
 
 生产模式关键配置不完整、Corresponding Source 地址缺失、开发者 Key/Firebase 凭据误配、入口秘密错误或拓扑不是单实例时，公网 Host 会返回 503/403，不会静默退回开发模式。
+
+GitHub Repository variable `PUBLIC_BETA_HOST` 可以包含反向代理公网端口，
+例如 `beta.example.com:8443`。构建时只把 `beta.example.com` 写入 Host
+白名单；公网健康检查继续访问
+`https://beta.example.com:8443/`。服务器环境文件中的
+`AIOS_PUBLIC_BETA_HOSTS` 必须保持为不带端口的主机名。
+
+发布脚本使用正式端口 `3000` 和候选端口 `3001`，只重启
+`ai-lifeos.service`。它不会修改服务器现有 Nginx、Tailscale Funnel、
+Xray 或持久环境文件。上线前仍需在服务器做一次只读核对，确认这些
+入口最终转发到 `127.0.0.1:3000`，并确认 `3001` 没有被其他服务占用。
+
+从现有 NVM 服务首次迁移时，必须先把原
+`/etc/systemd/system/ai-lifeos.service` 备份到
+`/etc/ai-lifeos/legacy/ai-lifeos.service`，并临时设置
+`AIOS_LEGACY_MIGRATION=1`。首次切换失败会恢复旧 unit 并重启原服务；
+备份缺失、存在 systemd drop-in 或旧服务不健康时会在切换前拒绝迁移。
 
 ## 发布包边界
 
