@@ -61,6 +61,24 @@ test('release workflow is manual-only and protected by production approval', () 
   assert.match(releaseWorkflow, /tag_type}" != "tag"/)
 })
 
+test('release workflow splits Linux tests from Windows DPAPI tests', () => {
+  assert.match(releaseWorkflow, /name: Run serial non-Windows regression/)
+  assert.match(
+    releaseWorkflow,
+    /! -name 'chatgpt-plan-oauth\.test\.mjs'[\s\S]*! -name 'chatgpt-plan-provider\.test\.mjs'[\s\S]*! -name 'chatgpt-plan-responses\.test\.mjs'/,
+  )
+  assert.match(releaseWorkflow, /windows-tests:\n\s+name: Verify Windows DPAPI tests/)
+  assert.match(releaseWorkflow, /runs-on: windows-latest/)
+  assert.match(
+    releaseWorkflow,
+    /tests\/chatgpt-plan-oauth\.test\.mjs\s+tests\/chatgpt-plan-provider\.test\.mjs\s+tests\/chatgpt-plan-responses\.test\.mjs/,
+  )
+  assert.match(
+    releaseWorkflow,
+    /deploy:\n\s+name: Deploy after production approval\n\s+needs:\n\s+- build\n\s+- windows-tests/,
+  )
+})
+
 test('release workflow refuses private AGPL source repositories', () => {
   assert.match(releaseWorkflow, /gh api "repos\/\$\{REPOSITORY\}" --jq \.private/)
   assert.match(releaseWorkflow, /must be public/)

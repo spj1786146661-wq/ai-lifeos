@@ -110,8 +110,21 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Run serial full regression
-        run: node --test --test-concurrency=1 tests/*.test.mjs
+      - name: Run serial non-Windows regression
+        run: |
+          set -euo pipefail
+          mapfile -t test_files < <(
+            find tests -maxdepth 1 -type f -name '*.test.mjs' \
+              ! -name 'chatgpt-plan-oauth.test.mjs' \
+              ! -name 'chatgpt-plan-provider.test.mjs' \
+              ! -name 'chatgpt-plan-responses.test.mjs' \
+              | sort
+          )
+          if [[ "${#test_files[@]}" -eq 0 ]]; then
+            echo "::error::No non-Windows test files were found."
+            exit 1
+          fi
+          node --test --test-concurrency=1 "${test_files[@]}"
 
       - name: Type-check
         run: ./node_modules/.bin/tsc --noEmit
@@ -169,9 +182,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows-tests:
+    name: Verify Windows DPAPI tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check confirmation phrase
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          $expected = "DEPLOY ${env:RELEASE_TAG}"
+          if ($env:CONFIRMATION -ne $expected) {
+            Write-Error "Confirmation must exactly match '$expected'."
+            exit 1
+          }
+
+      - name: Check out exact release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run Windows DPAPI regression
+        run: >-
+          node --test --test-concurrency=1
+          tests/chatgpt-plan-oauth.test.mjs
+          tests/chatgpt-plan-provider.test.mjs
+          tests/chatgpt-plan-responses.test.mjs
+
   deploy:
     name: Deploy after production approval
-    needs: build
+    needs:
+      - build
+      - windows-tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
