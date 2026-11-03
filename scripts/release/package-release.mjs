@@ -86,7 +86,7 @@ function main() {
     run('tar', ['-xf', archivePath, '-C', extractRoot])
 
     const releaseRoot = path.join(extractRoot, 'release')
-    for (const required of ['package.json', 'package-lock.json', 'LICENSE', 'next.config.ts']) {
+    for (const required of ['package.json', 'package-lock.json', 'LICENSE', 'next.config.mjs']) {
       if (!fs.existsSync(path.join(releaseRoot, required))) {
         throw new Error(`Tagged source is missing required release file: ${required}`)
       }

@@ -1,5 +1,3 @@
-import type { NextConfig } from 'next'
-
 const publicBetaBuild = Boolean(process.env.AIOS_PUBLIC_BETA_HOSTS?.trim())
 const baselineSecurityHeaders = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
@@ -12,7 +10,8 @@ const baselineSecurityHeaders = [
     : []),
 ]
 
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   // Kept unset in normal use. An isolated dev check can point this at a
   // separate local directory so it never shares .next or its dev lock.
   distDir: process.env.AIOS_DIST_DIR || '.next',

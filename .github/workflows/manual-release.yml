@@ -153,6 +153,9 @@ jobs:
           fi
           npm run build -- --webpack
 
+      - name: Verify production-only runtime
+        run: node scripts/release/verify-production-runtime.mjs
+
       - name: Package release and record checksum
         id: package
         env:

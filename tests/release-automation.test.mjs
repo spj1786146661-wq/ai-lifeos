@@ -27,9 +27,19 @@ const installNodeScriptPath = path.join(
   root,
   'scripts/release/server/install-node-runtime.sh',
 )
+const packageReleaseScriptPath = path.join(
+  root,
+  'scripts/release/package-release.mjs',
+)
+const productionRuntimeScriptPath = path.join(
+  root,
+  'scripts/release/verify-production-runtime.mjs',
+)
 const deployScript = fs.readFileSync(deployScriptPath, 'utf8')
 const rollbackScript = fs.readFileSync(rollbackScriptPath, 'utf8')
 const installNodeScript = fs.readFileSync(installNodeScriptPath, 'utf8')
+const packageReleaseScript = fs.readFileSync(packageReleaseScriptPath, 'utf8')
+const productionRuntimeScript = fs.readFileSync(productionRuntimeScriptPath, 'utf8')
 const bashExecutable = (() => {
   const candidates = ['bash']
   if (process.platform === 'win32') {
@@ -76,6 +86,22 @@ test('release workflow splits Linux tests from Windows DPAPI tests', () => {
   assert.match(
     releaseWorkflow,
     /deploy:\n\s+name: Deploy after production approval\n\s+needs:\n\s+- build\n\s+- windows-tests/,
+  )
+})
+
+test('production release configuration does not require TypeScript at runtime', () => {
+  assert.equal(fs.existsSync(path.join(root, 'next.config.mjs')), true)
+  assert.equal(fs.existsSync(path.join(root, 'next.config.ts')), false)
+  assert.match(packageReleaseScript, /'next\.config\.mjs'/)
+  assert.doesNotMatch(packageReleaseScript, /next\.config\.ts/)
+  assert.match(productionRuntimeScript, /npm-cli\.js/)
+  assert.match(productionRuntimeScript, /'ci', '--omit=dev'/)
+  assert.match(productionRuntimeScript, /node_modules', 'typescript'/)
+  assert.match(productionRuntimeScript, /AIOS_VERIFY_BUILD_DIR/)
+  assert.match(productionRuntimeScript, /requestHealth\(port\)/)
+  assert.match(
+    releaseWorkflow,
+    /name: Verify production-only runtime\n\s+run: node scripts\/release\/verify-production-runtime\.mjs/,
   )
 })
 
