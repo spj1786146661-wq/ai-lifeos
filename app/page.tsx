@@ -1442,7 +1442,16 @@ export default function HomePage() {
   return <main className="capsule-shell min-h-screen bg-[#070d1b] text-slate-100" style={{ '--surface': '#0d1a32', '--surface-2': '#1d2c49', '--border': 'rgba(103, 232, 249, 0.2)', '--muted': '#a9bad2' } as React.CSSProperties}>
     <div className="relative z-[1] mx-auto flex min-h-screen w-full max-w-5xl flex-col">
       <header className="sticky top-0 z-20 flex items-center justify-between border-b border-cyan-300/15 bg-[#081326]/90 px-4 py-3 backdrop-blur-xl sm:px-6">
-        <div><p className="font-mono text-[10px] tracking-[0.25em] text-cyan-300">AI / LIFE DATABASE</p><h1 className="text-xl font-black tracking-tight">AI人生数据库 <span className="text-cyan-300">◉</span></h1><p className="text-[11px] text-muted">AI记录人生，AI改变人生</p></div>
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/brand/jayc-brand-logo.png" alt="Jayc看世界 JaycGo 主品牌标志" className="h-[72px] w-auto shrink-0 self-stretch rounded-lg object-contain" width={128} height={72} />
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] tracking-[0.25em] text-cyan-300">AI / LIFE DATABASE</p>
+            <h1 className="text-xl font-black tracking-tight">AI人生数据库 <span className="text-cyan-300">◉</span></h1>
+            <p className="text-[11px] text-muted">AI记录人生，AI改变人生</p>
+          </div>
+        </div>
+        <div className="hidden shrink-0 items-center gap-2 rounded-full border border-cyan-300/25 bg-cyan-300/10 px-3 py-1 text-[11px] font-bold text-cyan-100 sm:flex">Jayc看世界 · JaycGo</div>
         {firebaseEnabled && user && <button className="text-xs text-muted underline" onClick={() => void signOut()}>退出</button>}
       </header>
       <div className="mx-4 mt-4 rounded-xl border border-cyan-300/20 bg-[#0d1b34]/90 px-3 py-2 text-xs text-cyan-100 sm:mx-6">
@@ -1698,7 +1707,8 @@ export default function HomePage() {
             </div>}
           </section>
           {tab === 'capture' && <div id="life-composer" className="capture-composer fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] left-0 right-0 z-10 max-h-[42dvh] overflow-y-auto border-t border-cyan-300/20 bg-[#081326]/95 p-3 backdrop-blur-xl sm:bottom-0 sm:max-h-[34dvh]"><div className="mx-auto max-w-2xl space-y-2">{!byokClient && <ImageComposer file={imageFile} onChange={file => { currentSendGuard().markDraftEdited(); setImageFile(file) }} disabled={busy} />}<div className="flex items-end gap-2"><label className="sr-only" htmlFor="life-text">输入记录或分析问题</label><textarea id="life-text" rows={2} maxLength={500} value={text} disabled={busy} onChange={event => editDraftText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage() } }} placeholder={byokClient && !byokConnection ? '请先到“我的”选择 AI 服务商并连接' : '说一件事，或问一个分析问题…'} className="max-h-32 min-h-14 flex-1 resize-none rounded-2xl border border-cyan-300/25 bg-[#101e38] px-4 py-3 text-base text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-300 disabled:opacity-60" /><button disabled={busy || (!text.trim() && !imageFile)} onClick={() => void sendMessage()} className="h-14 rounded-2xl bg-cyan-300 px-5 font-bold text-[#071326] disabled:opacity-50">{busy ? '处理中…' : '发送'}</button></div></div>{imageStatus && <p className="mx-auto mt-2 max-w-2xl text-xs text-cyan-200">{imageStatus}</p>}<div className="mx-auto mt-2 flex max-w-2xl items-center justify-between text-xs text-muted"><span>Enter 发送 · Shift+Enter 换行</span><input aria-label="记录日期" type="date" disabled={busy} value={date} onChange={event => { currentSendGuard().markDraftEdited(); setDate(event.target.value) }} className="rounded-lg border border-cyan-300/20 bg-[#101e38] px-2 py-1 text-slate-100 disabled:opacity-60" /></div></div>}
-          <nav className="fixed bottom-0 left-0 z-20 flex h-[4.5rem] w-full max-w-[100vw] items-center justify-around overflow-hidden border-t border-cyan-300/20 bg-[#081326]/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl sm:hidden" aria-label="主导航">{nav.map(item => <button key={item.id} onClick={() => selectTab(item.id)} aria-current={tab === item.id ? 'page' : undefined} className={'flex w-1/3 flex-col items-center gap-0.5 text-xs ' + (tab === item.id ? 'font-bold text-cyan-300' : 'text-muted')}><span className="font-mono text-lg">{item.icon}</span>{item.label}</button>)}</nav>
+          <nav className="fixed bottom-0 left-0 z-20 flex h-[4.5rem] w-full max-w-[100vw] items-center justify-around overflow-hidden border-t border-cyan-300/20 bg-[#081326]/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl sm:hidden" aria-label="主导航">{nav.map(item => <button key={item.id} onClick={() => selectTab(item.id)} aria-current={tab === item.id ? 'page' : undefined} className={'flex w-1/3 flex-col items-center gap-0.5 text-xs ' + (tab === item.id ? 'font-bold text-cyan-300' : 'text-muted')}><span className="relative flex h-8 w-8 items-center justify-center"><span className="font-mono text-lg">{item.icon}</span></span>{item.label}</button>)}
+          </nav>
         </>}
     </div>
   </main>
