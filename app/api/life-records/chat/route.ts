@@ -100,7 +100,9 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     )
   }
-  if ((publicBeta || personalAlphaByok) && !byokConnection) {
+  // Public Beta is strictly request-level BYOK. The personal Alpha host may use
+  // the server-side personal ChatGPT plan when no BYOK key is provided.
+  if (publicBeta && !byokConnection) {
     return NextResponse.json(
       { error: '请先在“我的 → AI 连接”中连接你自己的 AI 服务商 API Key', code: 'byok_required' },
       { status: 401 },
@@ -146,7 +148,9 @@ export async function POST(req: NextRequest) {
           records,
           messageId: actionId,
           byokConnection: byokConnection ?? undefined,
-          requireByok: publicBeta || personalAlphaByok,
+          // Public Beta is strictly request-level BYOK. The personal Alpha host
+          // may use the server-side personal ChatGPT plan without a BYOK key.
+          requireByok: publicBeta,
         })
         return publicBeta
           ? withPublicBetaRequestBudget({

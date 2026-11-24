@@ -246,7 +246,10 @@ async function runRemoteRecordExtraction(
   let model: string
   if (state.kind === 'chatgpt') {
     // The user's own ChatGPT plan, through the official OAuth path.
-    const result = await runChatgptPlanText({ instructions, input: [{ role: 'user', content: text }] })
+    const result = await runChatgptPlanText(
+      { instructions, input: [{ role: 'user', content: text }] },
+      { credentialsPath: process.env.CHATGPT_PLAN_CREDENTIALS_FILE },
+    )
     raw = result.text
     provider = 'chatgpt'
     model = result.model

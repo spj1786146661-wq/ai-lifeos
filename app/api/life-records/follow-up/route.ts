@@ -6,10 +6,7 @@ import { generateFollowUpRound } from '@/lib/life-follow-up-server'
 import { normalizeLifeRecord, validLifeDate, type LifeRecord } from '@/lib/life-records'
 import { requestHostname } from '@/lib/lan-access'
 import {
-  isPersonalAlphaByokHost,
   isPublicBetaApi,
-  PERSONAL_ALPHA_BYOK_ENV,
-  PERSONAL_ALPHA_BYOK_HOST_ENV,
   PUBLIC_BETA_VERIFIED_HEADER,
 } from '@/lib/lan-access'
 import { byokCredentialFingerprint, parseOptionalByokConnection } from '@/lib/ai/byok-server'
@@ -59,11 +56,6 @@ export async function POST(req: NextRequest) {
     req.headers.get(PUBLIC_BETA_VERIFIED_HEADER),
     process.env.AIOS_PUBLIC_BETA_HOSTS,
   )
-  const personalAlphaByok = isPersonalAlphaByokHost(
-    req.headers.get('host'),
-    process.env[PERSONAL_ALPHA_BYOK_ENV],
-    process.env[PERSONAL_ALPHA_BYOK_HOST_ENV],
-  )
   if (
     !publicBeta
     && (
@@ -102,7 +94,9 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     )
   }
-  if ((publicBeta || personalAlphaByok) && !byokConnection) {
+  // Public Beta is strictly request-level BYOK. The personal Alpha host may use
+  // the server-side personal ChatGPT plan when no BYOK key is provided.
+  if (publicBeta && !byokConnection) {
     return NextResponse.json(
       { error: 'AI 连接已丢失，请重新连接你自己的 AI 服务商 API Key', code: 'byok_required' },
       { status: 401 },
@@ -164,7 +158,7 @@ export async function POST(req: NextRequest) {
             round: roundValue,
             messageId,
             byokConnection: byokConnection ?? undefined,
-            requireByok: publicBeta || personalAlphaByok,
+            requireByok: publicBeta,
           })
           return {
             ...result,

@@ -247,27 +247,32 @@ test('Public Beta chat requires BYOK and never falls back to a developer key', a
   }
 })
 
-test('personal Alpha requires request-level BYOK for chat and follow-up', async () => {
+test('personal Alpha can fall back to the local ChatGPT plan without BYOK', async () => {
   let upstreamCalls = 0
   await withPersonalAlphaEnvironment(async () => {
     upstreamCalls += 1
-    throw new Error('developer credentials must never be used')
+    return new Response(JSON.stringify({
+      model: 'gpt-6.1-sol',
+      choices: [{ message: { content: JSON.stringify({
+        records: [{ type: 'sleep', date: '2026-10-26', hours: 7 }],
+        followUps: [],
+      }) } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
   }, async () => {
     const chat = await chatRoute.POST(personalAlphaRequest(
       '/api/life-records/chat',
-      chatBody('alpha-missing-key-chat', 'alpha-missing-key-session'),
+      chatBody('alpha-plan-fallback-chat', 'alpha-plan-fallback-session'),
     ))
-    assert.equal(chat.status, 401)
-    assert.equal((await chat.json()).code, 'byok_required')
+    assert.equal(chat.status, 200)
 
     const followUp = await followUpRoute.POST(personalAlphaRequest(
       '/api/life-records/follow-up',
       {
-        messageId: 'alpha-missing-key-follow-up',
-        clientSessionId: 'alpha-missing-key-session',
+        messageId: 'alpha-plan-fallback-follow-up',
+        clientSessionId: 'alpha-plan-fallback-session',
         round: 2,
         records: [{
-          id: 'alpha-missing-key-record',
+          id: 'alpha-plan-fallback-record',
           type: 'sleep',
           date: '2026-10-26',
           hours: 7,
@@ -277,9 +282,8 @@ test('personal Alpha requires request-level BYOK for chat and follow-up', async 
         history: [],
       },
     ))
-    assert.equal(followUp.status, 401)
-    assert.equal((await followUp.json()).code, 'byok_required')
-    assert.equal(upstreamCalls, 0)
+    assert.equal(followUp.status, 200)
+    assert.equal(upstreamCalls, 2)
   })
 })
 

@@ -367,7 +367,9 @@ export default function HomePage() {
 
   // ChatGPT 套餐授权状态：只读取服务端摘要，绝不接触令牌本身。
   const refreshPlanStatus = useCallback(async () => {
-    if (lanClient || byokClient) {
+    // Public Beta must never inspect the server's personal ChatGPT plan credentials.
+    // Local BYOK mode can still offer both connection choices.
+    if (lanClient || publicBetaClient) {
       setPlanStatus(EMPTY_PLAN_STATUS)
       return
     }
@@ -376,7 +378,7 @@ export default function HomePage() {
       const data = await response.json()
       if (response.ok) setPlanStatus(data as PlanStatus)
     } catch { setPlanStatus(EMPTY_PLAN_STATUS) }
-  }, [lanClient, byokClient])
+  }, [lanClient, publicBetaClient])
 
   useEffect(() => { void refreshPlanStatus() }, [refreshPlanStatus])
 
@@ -450,7 +452,9 @@ export default function HomePage() {
 
   async function sendMessage() {
     if ((!text.trim() && !imageFile) || busy || sendLock.current) return
-    if (byokClient && !byokConnection) {
+    // Public Beta is strictly request-level BYOK. Local modes may also fall
+    // back to the server-side personal ChatGPT plan when no BYOK key is set.
+    if (publicBetaClient && !byokConnection) {
       setError('请先到“我的 → AI 连接 → 免费开启 AI”完成三步连接。')
       setTab('profile')
       return
@@ -1122,7 +1126,8 @@ export default function HomePage() {
       setFollowUpError('局域网设备不调用电脑上的 AI 凭据；请在本机个人版继续动态追问。')
       return
     }
-    if (byokClient && !byokConnection) {
+    // Public Beta requires BYOK; personal Alpha may use the local plan.
+    if (publicBetaClient && !byokConnection) {
       setFollowUpError('当前浏览会话没有可用的 API Key，请重新连接后再继续智能补充。')
       return
     }
@@ -1664,7 +1669,8 @@ export default function HomePage() {
                 }}
                 onStartRecording={() => setTab('capture')}
               />}
-              {!byokClient && <section className="card space-y-3"><h3 className="font-bold">AI 连接方式</h3>
+              {!publicBetaClient && <section className="card space-y-3"><h3 className="font-bold">ChatGPT 套餐连接</h3>
+                <p className="text-xs leading-5 text-muted">本机网页模式可同时使用你自己的 ChatGPT 套餐和上方的大模型 API 连接。当前使用哪种方式，以首页「文字解析」状态和实际来源显示为准。</p>
                 <div className="flex justify-between gap-3 border-t border-cyan-300/15 pt-3 text-sm"><span className="text-muted">当前来源</span><strong>{planStatus ? planStatusText(planStatus) : '正在检查…'}</strong></div>
                 <div className="flex justify-between gap-3 border-t border-cyan-300/15 pt-3 text-sm"><span className="text-muted">真实模型调用</span><strong>{planUsable(planStatus) ? '可用' : '不可用 · 未调用 AI'}</strong></div>
                 {planStatus?.mode === 'chatgpt' && <div className="flex justify-between gap-3 border-t border-cyan-300/15 pt-3 text-sm"><span className="text-muted">授权账号</span><strong>{planStatus.account ?? '已授权账号'}</strong></div>}
